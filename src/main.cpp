@@ -1,22 +1,70 @@
 /*
- * BoschEBike Bridge — BLE bridge: bici Bosch → Suunto watch
+ * BoschEBike Bridge — transparent BLE proxy: Bosch eBike → Suunto watch
  *
- * Ruoli BLE:
- *   - GAP Peripheral + GATT Client  →  verso la bici (spec LDI Bosch)
- *   - GAP Peripheral + GATT Server  →  verso Suunto (LDI service trasparente)
+ * ── Overview ──────────────────────────────────────────────────────────────────
+ * The ESP32 sits between a Bosch eBike and a Suunto watch, forwarding the
+ * bike's raw protobuf LDI telemetry to the watch without any conversion.
+ * Both sides use the exact same Bosch LDI service/characteristic UUIDs, so
+ * the watch believes it is talking directly to the bike.
  *
- * Flusso normale (SIM_ENABLED = false):
- *   1. ESP32 advertise con solicitation LDI → bici si connette
- *   2. ESP32 legge notifiche LDI dalla bici (raw protobuf)
- *   3. ESP32 advertise con LDI service UUID → Suunto si connette
- *   4. ESP32 forward raw protobuf a Suunto via notify
+ * ── BLE roles on the ESP32 ────────────────────────────────────────────────────
+ *   GAP Peripheral + GATT Client  →  toward the bike (Bosch LDI spec)
+ *   GAP Peripheral + GATT Server  →  toward Suunto (mirrors the bike's GATT)
  *
- * Flusso simulazione (SIM_ENABLED = true):
- *   1. ESP32 advertise subito con LDI service UUID → Suunto si connette
- *   2. ESP32 genera dati fake (protobuf sintetico) e li invia al Suunto
- *   (nessuna connessione alla bici reale)
+ * The same physical BLE radio handles both connections simultaneously using
+ * NimBLE's multi-connection support. One connection handle is the bike (acting
+ * as GATT client on it), the other is the watch (acting as GATT server for it).
  *
- * Web UI/OTA: http://192.168.4.1
+ * ── Bosch LDI UUIDs ───────────────────────────────────────────────────────────
+ *   Service UUID:        0000eb20-eaa2-11e9-81b4-2a2ae2dbcce4
+ *   Characteristic UUID: 0000eb21-eaa2-11e9-81b4-2a2ae2dbcce4  (notify)
+ *
+ * ── Protobuf payload (LDI Live Data) ─────────────────────────────────────────
+ * Each BLE notification carries a Protobuf binary message (no framing/length):
+ *   Field  Wire  Value
+ *     1    varint  speed × 100  (÷100 → km/h)
+ *     2    varint  cadence (rpm)
+ *     5    varint  motor power (W)
+ *     9    varint  ambient light × 1000 (÷1000 → lux)
+ *    10    varint  battery state of charge (%)
+ *    12    varint  odometer × 1000 (÷1000 → km)
+ *    17    varint  bike light: 0=off, 1=on, 2=auto
+ *    21    varint  system locked (0/1)
+ *    22    varint  charger connected (0/1)
+ *    23    varint  light reserve active (0/1)
+ *    24    varint  diagnostics active (0/1)
+ *    25    varint  not driving / stationary (0/1)
+ *
+ * ── Advertising flow ──────────────────────────────────────────────────────────
+ * Phase 1 — attract the bike:
+ *   AD type 0x15 (Service Solicitation UUID 128-bit) with the LDI UUID.
+ *   The Bosch system unit scans for solicitation advertisements and connects
+ *   to the ESP32 as a GATT client (role reversal: bike is Central here).
+ *
+ * Phase 2 — attract the Suunto (after GATT is ready):
+ *   AD type 0x07 (Complete List of 128-bit Service UUIDs) with the LDI UUID.
+ *   The Suunto watch scans for this UUID and connects as a GATT client.
+ *
+ * ── Security / pairing ────────────────────────────────────────────────────────
+ * The bike requires Secure Connections (SC) + bonding with no I/O capability
+ * (Just Works pairing). The ESP32 accepts any pairing request automatically.
+ * GATT discovery starts only after the encryption handshake completes.
+ *
+ * ── Normal flow (SIM_ENABLED = false) ────────────────────────────────────────
+ *   1. ESP32 advertises LDI solicitation → bike connects
+ *   2. Pairing/bonding + GATT discovery → subscribe to LDI notifications
+ *   3. ESP32 switches advertising to LDI service UUID → Suunto connects
+ *   4. ESP32 forwards every raw protobuf notification from bike to Suunto
+ *
+ * ── Simulation flow (SIM_ENABLED = true) ─────────────────────────────────────
+ *   1. ESP32 immediately advertises LDI service UUID → Suunto connects
+ *   2. ESP32 generates synthetic protobuf data every 500 ms and notifies Suunto
+ *   (no real bike connection — useful for Suunto app development)
+ *
+ * ── Web UI / OTA ──────────────────────────────────────────────────────────────
+ *   Wi-Fi AP: "BoschEBike Bridge" / "password"
+ *   Dashboard: http://192.168.4.1
+ *   OTA update: http://192.168.4.1/update  (upload firmware.bin)
  */
 
 #include <Arduino.h>
@@ -27,19 +75,19 @@
 #include "nimble/nimble/host/include/host/ble_gatt.h"
 #include "nimble/nimble/host/include/host/ble_hs_mbuf.h"
 
-// ─── Simulazione (debug) ─────────────────────────────────────────────────────
-// true  → Suunto si connette subito, dati fake generati dall'ESP32
-// false → flusso normale: bici prima, poi Suunto con dati reali
+// ─── Simulation (debug) ──────────────────────────────────────────────────────
+// true  → Suunto connects immediately, fake data generated by the ESP32
+// false → normal flow: bike first, then Suunto with real data
 static const bool SIM_ENABLED = false;
 
 #define WIFI_AP_SSID  "BoschEBike Bridge"
 #define WIFI_AP_PASS  "password"
 
-// UUID LDI Bosch (usati sia lato client bici che lato server Suunto)
+// Bosch LDI UUIDs (same on both the bike client side and the Suunto server side)
 #define LDI_SVC_UUID  "0000eb20-eaa2-11e9-81b4-2a2ae2dbcce4"
 #define LDI_CHAR_UUID "0000eb21-eaa2-11e9-81b4-2a2ae2dbcce4"
 
-// ─── Dati live decodificati ───────────────────────────────────────────────────
+// ─── Decoded live data ────────────────────────────────────────────────────────
 struct LiveData {
     float   speedKmh     = 0.0f;
     int32_t cadenceRpm   = 0;
@@ -57,7 +105,7 @@ struct LiveData {
 };
 static LiveData gData;
 
-// ─── Decoder protobuf manuale ─────────────────────────────────────────────────
+// ─── Manual protobuf decoder ──────────────────────────────────────────────────
 struct VInt { uint64_t v; int p; };
 
 static VInt readVarint(const uint8_t* d, int pos, int len) {
@@ -101,7 +149,7 @@ static void decodeLiveData(const uint8_t* data, size_t len) {
     gData = ld;
 }
 
-// ─── Encoder protobuf (per simulazione) ──────────────────────────────────────
+// ─── Protobuf encoder (for simulation) ───────────────────────────────────────
 static void notifyLdiData(const uint8_t* data, size_t len);  // forward decl
 
 static int encodeVarint(uint8_t* buf, uint64_t val) {
@@ -120,7 +168,7 @@ static int encodeField(uint8_t* buf, int fieldNum, uint64_t val) {
     return n;
 }
 
-// Onda triangolare: oscilla tra lo e hi con periodo periodMs
+// Triangle wave: oscillates between lo and hi with the given period
 static int32_t triWave(uint32_t ms, uint32_t periodMs, int32_t lo, int32_t hi) {
     uint32_t phase = ms % periodMs;
     int32_t half  = (int32_t)(periodMs / 2);
@@ -149,11 +197,11 @@ static void generateAndNotifySimData() {
     p += encodeField(p, 12, odoRaw);
 
     size_t len = (size_t)(p - buf);
-    decodeLiveData(buf, len);   // aggiorna gData per web UI
+    decodeLiveData(buf, len);   // update gData for the web UI
     notifyLdiData(buf, len);
 }
 
-// ─── BLE stato ───────────────────────────────────────────────────────────────
+// ─── BLE state ────────────────────────────────────────────────────────────────
 static NimBLEServer*         pServer        = nullptr;
 static NimBLECharacteristic* pLdiServerChar = nullptr;
 static uint32_t              nextGattRetryMs  = 0;
@@ -190,7 +238,7 @@ static void startAdvertisingForEbike();
 static void startAdvertisingForSuunto();
 static bool openGattClient();
 
-// ─── Forward raw LDI payload al Suunto ───────────────────────────────────────
+// ─── Forward raw LDI payload to Suunto ───────────────────────────────────────
 static void notifyLdiData(const uint8_t* data, size_t len) {
     if (!suuntoConnected || !pLdiServerChar) return;
     pLdiServerChar->setValue(data, len);
@@ -202,7 +250,7 @@ static void handleLdiPayload(const uint8_t* data, size_t len) {
     notifyLdiData(data, len);
 }
 
-// ─── GATT client callbacks (lato bici) ───────────────────────────────────────
+// ─── GATT client callbacks (bike side) ───────────────────────────────────────
 static int gattWriteCccdCB(uint16_t, const struct ble_gatt_error* error,
                            struct ble_gatt_attr*, void*) {
     if (error->status == 0) {
@@ -362,7 +410,7 @@ static int customGapHandler(struct ble_gap_event* event, void*) {
 // ─── BLE Server Callbacks ─────────────────────────────────────────────────────
 class ServerCB : public NimBLEServerCallbacks {
     void onConnect(NimBLEServer*, ble_gap_conn_desc* desc) override {
-        // In SIM_ENABLED la bici non si connette mai: ogni connessione è Suunto
+        // In SIM_ENABLED the bike never connects: every incoming connection is Suunto
         if (!SIM_ENABLED && !ebikeConnected) {
             NimBLEAddress addr(desc->peer_ota_addr);
             ebikeAddr = addr;
@@ -390,12 +438,12 @@ class ServerCB : public NimBLEServerCallbacks {
     bool onConfirmPIN(uint32_t) override { return true; }
 };
 
-// ─── BLE advertising ─────────────────────────────────────────────────────────
+// ─── BLE advertising ──────────────────────────────────────────────────────────
 static void startAdvertisingForEbike() {
     auto* adv = NimBLEDevice::getAdvertising();
     adv->reset();
 
-    // Solicitation LDI: la bici vede la richiesta e si connette all'ESP32
+    // LDI solicitation: the bike sees the request and connects to the ESP32
     const uint8_t advPayload[] = {
         0x02, 0x01, 0x06,
         0x11, 0x15,  // Complete list of 128-bit service solicitation UUIDs
@@ -419,7 +467,7 @@ static void startAdvertisingForSuunto() {
     auto* adv = NimBLEDevice::getAdvertising();
     adv->reset();
 
-    // Espone LDI service UUID: il Suunto si connette come se fosse la bici
+    // Expose LDI service UUID: Suunto connects as if it were talking to the bike
     const uint8_t advPayload[] = {
         0x02, 0x01, 0x06,
         0x11, 0x07,  // Complete list of 128-bit service UUIDs
@@ -474,7 +522,7 @@ static WebServer webServer(80);
 static bool webOk = false;
 
 static const char INDEX_HTML[] PROGMEM = R"html(<!DOCTYPE html>
-<html lang="it"><head><meta charset="utf-8">
+<html lang="en"><head><meta charset="utf-8">
 <title>BoschEBike Bridge</title>
 <style>
 *{box-sizing:border-box}
@@ -492,22 +540,22 @@ h1{color:#58a6ff;font-size:18px;margin:0 0 4px}
 #ts{margin-top:10px;color:#484f58;font-size:11px}
 </style></head><body>
 <h1>BoschEBike Bridge</h1>
-<div id="st" style="color:#3fb950">Connessione...</div>
+<div id="st" style="color:#3fb950">Connecting...</div>
 <div class="grid">
-  <div class="card"><div class="lbl">VELOCITÀ</div><span class="val" id="spd">-</span> <span class="unit">km/h</span></div>
-  <div class="card"><div class="lbl">CADENZA</div><span class="val" id="cad">-</span> <span class="unit">rpm</span></div>
-  <div class="card"><div class="lbl">POTENZA</div><span class="val" id="pwr" style="color:#3fb950">-</span> <span class="unit">W</span></div>
-  <div class="card"><div class="lbl">BATTERIA</div><span class="val" id="bat" style="color:#58a6ff">-</span> <span class="unit">%</span></div>
-  <div class="card"><div class="lbl">ODOMETRO</div><span class="val" id="odo">-</span> <span class="unit">km</span></div>
-  <div class="card"><div class="lbl">LUCE AMBIENTE</div><span class="val" id="lux" style="color:#d29922">-</span> <span class="unit">lux</span></div>
+  <div class="card"><div class="lbl">SPEED</div><span class="val" id="spd">-</span> <span class="unit">km/h</span></div>
+  <div class="card"><div class="lbl">CADENCE</div><span class="val" id="cad">-</span> <span class="unit">rpm</span></div>
+  <div class="card"><div class="lbl">POWER</div><span class="val" id="pwr" style="color:#3fb950">-</span> <span class="unit">W</span></div>
+  <div class="card"><div class="lbl">BATTERY</div><span class="val" id="bat" style="color:#58a6ff">-</span> <span class="unit">%</span></div>
+  <div class="card"><div class="lbl">ODOMETER</div><span class="val" id="odo">-</span> <span class="unit">km</span></div>
+  <div class="card"><div class="lbl">AMBIENT LIGHT</div><span class="val" id="lux" style="color:#d29922">-</span> <span class="unit">lux</span></div>
 </div>
 <div class="flags">
-  <span class="f off" id="fl_lt">Luce: -</span>
+  <span class="f off" id="fl_lt">Light: -</span>
   <span class="f off" id="fl_lk">Lock</span>
   <span class="f off" id="fl_ch">Charger</span>
   <span class="f off" id="fl_rv">Reserve</span>
   <span class="f off" id="fl_dg">Diag</span>
-  <span class="f off" id="fl_st">Fermo</span>
+  <span class="f off" id="fl_st">Stationary</span>
   <span class="f off" id="fl_su">Suunto</span>
 </div>
 <div id="ts"></div>
@@ -519,10 +567,10 @@ function pollData(){
   if(busy)return; busy=true;
   fetch('/data',{cache:'no-store'}).then(r=>r.json()).then(d=>{
     var s=document.getElementById('st');
-    if(d.sim){s.style.color='#a371f7';s.textContent='SIMULAZIONE | Suunto: '+(d.suunto?'connesso':'in advertising');}
-    else if(!d.ebike){s.style.color='#d29922';s.textContent='BLE: in attesa bici...';}
-    else if(!d.gatt){s.style.color='#d29922';s.textContent='Bici: connessa | GATT: in discovery...';}
-    else{s.style.color='#3fb950';s.textContent='Bici: connessa | Suunto: '+(d.suunto?'connesso':'in advertising');}
+    if(d.sim){s.style.color='#a371f7';s.textContent='SIMULATION | Suunto: '+(d.suunto?'connected':'advertising');}
+    else if(!d.ebike){s.style.color='#d29922';s.textContent='BLE: waiting for bike...';}
+    else if(!d.gatt){s.style.color='#d29922';s.textContent='Bike: connected | GATT: discovering...';}
+    else{s.style.color='#3fb950';s.textContent='Bike: connected | Suunto: '+(d.suunto?'connected':'advertising');}
     var v=d.valid;
     document.getElementById('spd').textContent=v?d.speed.toFixed(1):'-';
     document.getElementById('cad').textContent=v?d.cadence:'-';
@@ -530,15 +578,15 @@ function pollData(){
     document.getElementById('bat').textContent=v?d.battery:'-';
     document.getElementById('odo').textContent=v?d.odometer.toFixed(1):'-';
     document.getElementById('lux').textContent=v?d.ambient.toFixed(0):'-';
-    f('fl_lt',d.bike_light===2,'Luce: '+(LT[d.bike_light]||'-'));
+    f('fl_lt',d.bike_light===2,'Light: '+(LT[d.bike_light]||'-'));
     f('fl_lk',d.locked,'Lock');
     f('fl_ch',d.charger,'Charger');
     f('fl_rv',d.reserve,'Reserve');
     f('fl_dg',d.diag,'Diag');
-    f('fl_st',d.standstill,'Fermo');
+    f('fl_st',d.standstill,'Stationary');
     f('fl_su',d.suunto,'Suunto');
-    document.getElementById('ts').textContent='Aggiornato: '+new Date().toLocaleTimeString()+'.'+String(new Date().getMilliseconds()).padStart(3,'0');
-  }).catch(()=>{document.getElementById('st').textContent='Errore connessione web';})
+    document.getElementById('ts').textContent='Updated: '+new Date().toLocaleTimeString()+'.'+String(new Date().getMilliseconds()).padStart(3,'0');
+  }).catch(()=>{document.getElementById('st').textContent='Web connection error';})
     .finally(()=>{busy=false;});
 }
 pollData();
@@ -561,7 +609,7 @@ static void handleStatus() {
 }
 
 static const char UPDATE_HTML[] PROGMEM = R"html(<!DOCTYPE html>
-<html lang="it"><head><meta charset="utf-8">
+<html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>BoschEBike Bridge OTA</title>
 <style>
@@ -574,12 +622,12 @@ input,button{width:100%;font-size:15px;margin-top:12px}
 button{background:#1f6feb;color:white;border:0;border-radius:6px;padding:10px}
 p{color:#8b949e;font-size:13px;line-height:1.4}
 </style></head><body><main>
-<h1>Aggiornamento firmware</h1>
+<h1>Firmware update</h1>
 <form method="POST" action="/update" enctype="multipart/form-data">
 <input type="file" name="firmware" accept=".bin" required>
-<button type="submit">Carica firmware</button>
+<button type="submit">Upload firmware</button>
 </form>
-<p>Usa il file <code>.pio/build/esp32dev/firmware.bin</code>. L'ESP32 si riavvia automaticamente dopo un aggiornamento riuscito.</p>
+<p>Use the file <code>.pio/build/esp32dev/firmware.bin</code>. The ESP32 reboots automatically after a successful update.</p>
 </main></body></html>)html";
 
 static void handleUpdatePage() {
@@ -604,7 +652,7 @@ static void handleUpdateDone() {
     bool ok = !Update.hasError();
     webServer.sendHeader("Connection", "close");
     webServer.send(ok ? 200 : 500, "text/plain",
-                   ok ? "Aggiornamento completato. Riavvio..." : "Aggiornamento fallito.");
+                   ok ? "Update complete. Rebooting..." : "Update failed.");
     if (ok) { delay(500); ESP.restart(); }
 }
 
@@ -633,7 +681,7 @@ static void handleData() {
     webServer.send(200, "application/json", buf);
 }
 
-// ─── Setup ───────────────────────────────────────────────────────────────────
+// ─── Setup ────────────────────────────────────────────────────────────────────
 void setup() {
     Serial.begin(115200);
 
@@ -660,7 +708,7 @@ void setup() {
     pServer = NimBLEDevice::createServer();
     pServer->setCallbacks(new ServerCB());
 
-    // LDI GATT server: stessi UUID della bici → Suunto si connette trasparentemente
+    // LDI GATT server: same UUIDs as the bike → Suunto connects transparently
     auto* pLdiSvc = pServer->createService(NimBLEUUID(LDI_SVC_UUID));
     pLdiServerChar = pLdiSvc->createCharacteristic(
         NimBLEUUID(LDI_CHAR_UUID),
@@ -669,13 +717,13 @@ void setup() {
     pLdiSvc->start();
 
     if (SIM_ENABLED) {
-        startAdvertisingForSuunto();  // in sim mode il Suunto si connette subito
+        startAdvertisingForSuunto();  // in sim mode Suunto connects immediately
     } else {
         resetAndAdvertiseForEbike();
     }
 }
 
-// ─── Loop ────────────────────────────────────────────────────────────────────
+// ─── Loop ─────────────────────────────────────────────────────────────────────
 void loop() {
     if (webOk) webServer.handleClient();
 
@@ -712,7 +760,7 @@ void loop() {
         if (SIM_ENABLED || ebikeGattReady) startAdvertisingForSuunto();
     }
 
-    // Genera dati simulati quando SIM_ENABLED e Suunto connesso (senza bici)
+    // Generate simulated data when SIM_ENABLED and Suunto is connected
     if (SIM_ENABLED && suuntoConnected &&
         (int32_t)(millis() - nextSimNotifyMs) >= 0) {
         generateAndNotifySimData();
