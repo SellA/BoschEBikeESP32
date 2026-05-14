@@ -75,13 +75,35 @@ The ESP32 reboots automatically after a successful update.
 
 ## First-time pairing
 
-1. Turn on the Bosch bike
-2. Power up the ESP32 — it starts advertising with an LDI solicitation
-3. The bike connects automatically to the ESP32 (BLE name: `BoschEBike Bridge`)
-4. The ESP32 switches to advertising as `BoschEBike`
-5. On the Suunto: add a sensor and search for **BoschEBike** (see the Suunto app README)
+### Requirements
 
-> If the Suunto was previously paired directly with the bike, you must first **forget the device** in the watch's Bluetooth settings, then search for `BoschEBike` to pair with the ESP32 instead.
+- Bosch smart system with **drive unit firmware v19 or newer** (check in Flow app: Bike → Settings → System Information → Drive Unit Software Version)
+- **eBike Flow app** installed on your phone and connected to the bike
+
+### Step 1 — Register the bridge in the Bosch Flow app
+
+The bike only allows LDI connections from devices registered as accessories.
+
+1. Power on the bike and open the **eBike Flow app**
+2. Go to **eBike settings (top right) → Components → Add new device**
+3. Select **Accessories**
+4. Power up the ESP32 — it starts advertising as an LDI accessory
+5. The app will detect the bridge; tap to confirm the pairing
+6. The bridge now appears under **Components** in the Flow app
+
+> This step is required only once. The bike will remember the bridge and reconnect automatically on subsequent power-ups.
+
+### Step 2 — Connect the Suunto watch
+
+Once the bike is paired with the ESP32:
+
+1. Power on the bike and the ESP32 — the bike connects to the bridge automatically
+2. The ESP32 switches to advertising as `BoschEBike` (LDI server mode)
+3. On the Suunto: start a workout, swipe to the SuuntoPlus screen and select **Bosch eBike** — the watch connects automatically via BLE
+
+See [BoschEBikeSuunto](https://github.com/SellA/BoschEBikeSuunto) for Suunto app installation instructions.
+
+> **Note:** only one LDI accessory can be connected at a time. If a Kiox 500 display or a Bosch GPS device is also paired, it will compete for the same connection slot.
 
 ## Simulation mode
 
@@ -115,3 +137,7 @@ Data is sent as binary protobuf over BLE notifications:
 ## Dependencies
 
 - [NimBLE-Arduino](https://github.com/h2zero/NimBLE-Arduino) `^1.4.3`
+
+## Related
+
+- [BoschEBikeSuunto](https://github.com/SellA/BoschEBikeSuunto) — the Suunto watch app that displays live data from this bridge
