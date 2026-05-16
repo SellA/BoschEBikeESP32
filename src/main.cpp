@@ -179,6 +179,9 @@ static int32_t triWave(uint32_t ms, uint32_t periodMs, int32_t lo, int32_t hi) {
 }
 
 static uint32_t nextSimNotifyMs = 0;
+static uint32_t nextNoEbikeNotifyMs = 0;
+
+static const int BRIDGE_NO_EBIKE_FIELD = 100;
 
 static void generateAndNotifySimData() {
     uint32_t t = millis();
@@ -198,6 +201,21 @@ static void generateAndNotifySimData() {
 
     size_t len = (size_t)(p - buf);
     decodeLiveData(buf, len);   // update gData for the web UI
+    notifyLdiData(buf, len);
+}
+
+static void notifyNoEbikeData() {
+    uint8_t buf[32];
+    uint8_t* p = buf;
+    p += encodeField(p,  1, 0); // speed
+    p += encodeField(p,  2, 0); // cadence
+    p += encodeField(p,  5, 0); // power
+    p += encodeField(p, 10, 0); // battery
+    p += encodeField(p, 12, 0); // odometer
+    p += encodeField(p, BRIDGE_NO_EBIKE_FIELD, 1);
+
+    size_t len = (size_t)(p - buf);
+    decodeLiveData(buf, len);
     notifyLdiData(buf, len);
 }
 
@@ -803,12 +821,20 @@ void loop() {
         flagSuuntoConn = false;
         suuntoConnected = true;
         nextSimNotifyMs = 0;
+        nextNoEbikeNotifyMs = 0;
     }
     if (flagSuuntoDisconn) {
         flagSuuntoDisconn = false;
         suuntoConnected = false;
         nextSimNotifyMs = 0;
+        nextNoEbikeNotifyMs = 0;
         if (SIM_ENABLED || ebikeGattReady) startAdvertisingForSuunto();
+    }
+
+    if (!SIM_ENABLED && suuntoConnected && !ebikeConnected &&
+        (int32_t)(millis() - nextNoEbikeNotifyMs) >= 0) {
+        notifyNoEbikeData();
+        nextNoEbikeNotifyMs = millis() + 1000;
     }
 
     // Generate simulated data when SIM_ENABLED and Suunto is connected
