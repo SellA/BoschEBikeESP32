@@ -206,6 +206,7 @@ static NimBLEServer*         pServer        = nullptr;
 static NimBLECharacteristic* pLdiServerChar = nullptr;
 static uint32_t              nextGattRetryMs  = 0;
 static uint16_t              ebikeConnHandle  = BLE_HS_CONN_HANDLE_NONE;
+static uint16_t              suuntoConnHandle = BLE_HS_CONN_HANDLE_NONE;
 static uint16_t              ldiSvcStart      = 0;
 static uint16_t              ldiSvcEnd        = 0;
 static uint16_t              ldiCharHandle    = 0;
@@ -257,7 +258,7 @@ static int gattWriteCccdCB(uint16_t, const struct ble_gatt_error* error,
         ebikeGattReady = true;
         gattDiscoveryActive = false;
         nextGattRetryMs = 0;
-        startAdvertisingForSuunto();
+        if (!suuntoConnected) startAdvertisingForSuunto();
     } else {
         gattDiscoveryActive = false;
         nextGattRetryMs = millis() + 3000;
@@ -419,6 +420,7 @@ class ServerCB : public NimBLEServerCallbacks {
             ebikeEncrypted = desc->sec_state.encrypted;
             flagEbikePeripheralConn = true;
         } else {
+            suuntoConnHandle = desc->conn_handle;
             flagSuuntoConn = true;
         }
     }
@@ -432,6 +434,9 @@ class ServerCB : public NimBLEServerCallbacks {
             ebikeConnHandle = BLE_HS_CONN_HANDLE_NONE;
             flagEbikeDisconn = true;
         } else {
+            if (desc->conn_handle == suuntoConnHandle) {
+                suuntoConnHandle = BLE_HS_CONN_HANDLE_NONE;
+            }
             flagSuuntoDisconn = true;
         }
     }
@@ -507,11 +512,11 @@ static bool openGattClient() {
 }
 
 static void resetAndAdvertiseForEbike() {
-    ebikeConnected = ebikeGattReady = suuntoConnected = false;
+    ebikeConnected = ebikeGattReady = false;
     gattDiscoveryActive = ebikeEncrypted = gattStartPending = false;
     ebikeConnHandle = BLE_HS_CONN_HANDLE_NONE;
     ldiSvcStart = ldiSvcEnd = ldiCharHandle = ldiCccdHandle = 0;
-    flagEbikePeripheralConn = flagEbikeDisconn = flagSuuntoConn = flagSuuntoDisconn = false;
+    flagEbikePeripheralConn = flagEbikeDisconn = false;
     gData = LiveData{};
     nextGattRetryMs = 0;
     startAdvertisingForEbike();
