@@ -520,6 +520,13 @@ static void resetAndAdvertiseForEbike() {
 // ─── Web server ───────────────────────────────────────────────────────────────
 static WebServer webServer(80);
 static bool webOk = false;
+static bool wifiActive = false;
+static bool webHadClient = false;
+static uint32_t webStartedMs = 0;
+static uint32_t lastWebClientSeenMs = 0;
+
+static const uint32_t WEB_BOOT_WINDOW_MS = 60000;
+static const uint32_t WEB_IDLE_AFTER_CLIENT_MS = 60000;
 
 static const char INDEX_HTML[] PROGMEM = R"html(<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8">
@@ -590,7 +597,7 @@ function pollData(){
     .finally(()=>{busy=false;});
 }
 pollData();
-setInterval(pollData,500);
+setInterval(pollData,1000);
 </script></body></html>)html";
 
 static void handleRoot() {
@@ -682,9 +689,7 @@ static void handleData() {
 }
 
 // ─── Setup ────────────────────────────────────────────────────────────────────
-void setup() {
-    Serial.begin(115200);
-
+static void startWebDebug() {
     IPAddress apIp(192, 168, 4, 1);
     WiFi.mode(WIFI_AP);
     WiFi.setSleep(false);
@@ -697,7 +702,45 @@ void setup() {
     webServer.on("/update", HTTP_GET,  handleUpdatePage);
     webServer.on("/update", HTTP_POST, handleUpdateDone, handleUpdateUpload);
     webServer.begin();
+
+    webStartedMs = millis();
+    lastWebClientSeenMs = webStartedMs;
+    webHadClient = false;
     webOk = true;
+    wifiActive = true;
+}
+
+static void stopWebDebug() {
+    webServer.close();
+    WiFi.softAPdisconnect(true);
+    WiFi.disconnect(true);
+    WiFi.mode(WIFI_OFF);
+    webOk = false;
+    wifiActive = false;
+}
+
+static void manageWebPower() {
+    if (!wifiActive) return;
+
+    uint32_t now = millis();
+    uint8_t stations = WiFi.softAPgetStationNum();
+    if (stations > 0) {
+        webHadClient = true;
+        lastWebClientSeenMs = now;
+        return;
+    }
+
+    uint32_t timeoutMs = webHadClient ? WEB_IDLE_AFTER_CLIENT_MS : WEB_BOOT_WINDOW_MS;
+    uint32_t referenceMs = webHadClient ? lastWebClientSeenMs : webStartedMs;
+    if ((int32_t)(now - referenceMs - timeoutMs) >= 0) {
+        stopWebDebug();
+    }
+}
+
+void setup() {
+    Serial.begin(115200);
+
+    startWebDebug();
 
     NimBLEDevice::init("BoschEBike Bridge");
     NimBLEDevice::setSecurityAuth(BLE_SM_PAIR_AUTHREQ_SC | BLE_SM_PAIR_AUTHREQ_BOND);
@@ -725,7 +768,10 @@ void setup() {
 
 // ─── Loop ─────────────────────────────────────────────────────────────────────
 void loop() {
-    if (webOk) webServer.handleClient();
+    if (webOk) {
+        webServer.handleClient();
+        manageWebPower();
+    }
 
     if (!SIM_ENABLED) {
         if (flagEbikeDisconn) {
