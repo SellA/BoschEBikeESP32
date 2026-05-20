@@ -782,6 +782,34 @@ static void resetAndAdvertiseForEbike() {
     startAdvertisingForEbike();
 }
 
+// ─── SC Control Point callbacks (CSC mode) ────────────────────────────────────
+// The SC Control Point (0x2A55) is mandatory when Wheel Revolution Data is
+// supported (CSC Feature bit 0). Suunto and other strict clients check for it
+// and disconnect if it is absent. We implement opcode 0x01 (Set Cumulative
+// Value) to let the client reset the wheel rev counter; all other opcodes get
+// "Opcode Not Supported" (0x02).
+class ScControlPointCB : public NimBLECharacteristicCallbacks {
+    void onWrite(NimBLECharacteristic* pChar) override {
+        std::string val = pChar->getValue();
+        if (val.empty()) return;
+        uint8_t opcode = (uint8_t)val[0];
+        uint8_t result = 0x01;  // Success
+        if (opcode == 0x01 && val.size() >= 5) {
+            uint32_t cumVal = (uint8_t)val[1] | ((uint8_t)val[2] << 8) |
+                              ((uint8_t)val[3] << 16) | ((uint8_t)val[4] << 24);
+            cscWheelRevTotal = cumVal;
+            cscWheelRevFrac  = 0.0f;
+            dblog("SCCP: set cumulative=%lu", (unsigned long)cumVal);
+        } else {
+            result = 0x02;  // Opcode Not Supported
+            dblog("SCCP: opcode=0x%02x not supported", opcode);
+        }
+        uint8_t resp[3] = { 0x10, opcode, result };
+        pChar->setValue(resp, 3);
+        pChar->indicate();
+    }
+};
+
 // ─── Web server ───────────────────────────────────────────────────────────────
 static WebServer webServer(80);
 static bool     webOk             = false;
@@ -1279,30 +1307,42 @@ void setup() {
                                                NIMBLE_PROPERTY::NOTIFY);
         svc->start();
     } else if (gMode == MODE_POWER_SENSOR) {
-        auto* svc = pServer->createService(NimBLEUUID(CPS_SVC_UUID));
-        pCpsChar  = svc->createCharacteristic(NimBLEUUID(CPS_MEAS_UUID),
-                                               NIMBLE_PROPERTY::NOTIFY);
-        auto* feat = svc->createCharacteristic(NimBLEUUID(CPS_FEAT_UUID),
+        // Use explicit 16-bit UUIDs — NimBLE stores 128-bit-string UUIDs as
+        // 128-bit in the attribute table, which strict fitness clients may reject.
+        auto* svc = pServer->createService(NimBLEUUID((uint16_t)0x1818));
+        pCpsChar  = svc->createCharacteristic(NimBLEUUID((uint16_t)0x2A63),
+                                               NIMBLE_PROPERTY::NOTIFY |
+                                               NIMBLE_PROPERTY::READ);
+        auto* feat = svc->createCharacteristic(NimBLEUUID((uint16_t)0x2A65),
                                                 NIMBLE_PROPERTY::READ);
         uint32_t featVal = 0x00000000;
         feat->setValue((uint8_t*)&featVal, 4);
-        auto* loc = svc->createCharacteristic(NimBLEUUID(SENSOR_LOC_UUID),
+        auto* loc = svc->createCharacteristic(NimBLEUUID((uint16_t)0x2A5D),
                                                NIMBLE_PROPERTY::READ);
         uint8_t locVal = 0x00;  // Other
         loc->setValue(&locVal, 1);
         svc->start();
     } else {
-        auto* svc = pServer->createService(NimBLEUUID(CSC_SVC_UUID));
-        pCscChar  = svc->createCharacteristic(NimBLEUUID(CSC_MEAS_UUID),
-                                               NIMBLE_PROPERTY::NOTIFY);
-        auto* feat = svc->createCharacteristic(NimBLEUUID(CSC_FEAT_UUID),
+        // Use explicit 16-bit UUIDs (see CPS comment above).
+        auto* svc = pServer->createService(NimBLEUUID((uint16_t)0x1816));
+        pCscChar  = svc->createCharacteristic(NimBLEUUID((uint16_t)0x2A5B),
+                                               NIMBLE_PROPERTY::NOTIFY |
+                                               NIMBLE_PROPERTY::READ);
+        auto* feat = svc->createCharacteristic(NimBLEUUID((uint16_t)0x2A5C),
                                                 NIMBLE_PROPERTY::READ);
         uint16_t featVal = 0x0003;  // Wheel Revolution Data + Crank Revolution Data
         feat->setValue((uint8_t*)&featVal, 2);
-        auto* loc = svc->createCharacteristic(NimBLEUUID(SENSOR_LOC_UUID),
+        auto* loc = svc->createCharacteristic(NimBLEUUID((uint16_t)0x2A5D),
                                                NIMBLE_PROPERTY::READ);
         uint8_t locVal = 0x00;
         loc->setValue(&locVal, 1);
+        // SC Control Point: mandatory when Wheel Revolution Data is supported
+        // (CSC Feature bit 0 = 1). Clients that find it absent consider the
+        // sensor non-compliant and disconnect immediately.
+        auto* sccp = svc->createCharacteristic(NimBLEUUID((uint16_t)0x2A55),
+                                                NIMBLE_PROPERTY::WRITE |
+                                                NIMBLE_PROPERTY::INDICATE);
+        sccp->setCallbacks(new ScControlPointCB());
         svc->start();
     }
 
