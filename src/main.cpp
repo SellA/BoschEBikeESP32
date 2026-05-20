@@ -77,10 +77,11 @@ static void buildDeviceName() {
     snprintf(gDeviceName, sizeof(gDeviceName), "%s%s", gBaseDeviceName, suffix);
 }
 
-// ─── Simulation (debug) ───────────────────────────────────────────────────────
-// true  → client connects immediately, ESP32 generates fake data
-// false → normal flow: bike first, then client with real data
-static const bool SIM_ENABLED = false;
+// ─── Simulation ───────────────────────────────────────────────────────────────
+// When gSimEnabled is true the ESP32 generates synthetic data and advertises
+// immediately for the client, without connecting to a real bike.
+// Toggled via web UI (/setsim) and stored in NVS key "sim".
+static bool gSimEnabled = false;
 
 #define WIFI_AP_SSID "BoschEBike Bridge"
 #define WIFI_AP_PASS "password"
@@ -597,7 +598,7 @@ static int customGapHandler(struct ble_gap_event* event, void*) {
 // ─── BLE server callbacks ─────────────────────────────────────────────────────
 class ServerCB : public NimBLEServerCallbacks {
     void onConnect(NimBLEServer*, ble_gap_conn_desc* desc) override {
-        if (!SIM_ENABLED && !ebikeConnected) {
+        if (!gSimEnabled && !ebikeConnected) {
             ebikeAddr       = NimBLEAddress(desc->peer_ota_addr);
             ebikeConnHandle = desc->conn_handle;
             ebikeConnected  = true;
@@ -609,7 +610,7 @@ class ServerCB : public NimBLEServerCallbacks {
         }
     }
     void onDisconnect(NimBLEServer*, ble_gap_conn_desc* desc) override {
-        if (!SIM_ENABLED && desc->conn_handle == ebikeConnHandle) {
+        if (!gSimEnabled && desc->conn_handle == ebikeConnHandle) {
             ebikeConnected      = false;
             ebikeGattReady      = false;
             gattDiscoveryActive = false;
@@ -797,6 +798,14 @@ h1{color:#58a6ff;font-size:18px;margin:0 0 4px}
   <div id="dnprev"></div>
   <div id="dnst"></div>
 </div>
+<div class="msect">
+  <div class="lbl">SIMULATION</div>
+  <div style="margin-top:6px">
+    <button class="mbtn" id="sb0" onclick="setSim(0)">Real eBike</button>
+    <button class="mbtn" id="sb1" onclick="setSim(1)">Simulated</button>
+  </div>
+  <div id="sst" style="font-size:11px;color:#8b949e;margin-top:6px;min-height:16px"></div>
+</div>
 <div id="ts"></div>
 <script>
 const LT=['−','OFF','ON'];
@@ -826,6 +835,12 @@ function saveName(){
     .then(r=>r.text()).then(t=>{document.getElementById('dnst').textContent=t;})
     .catch(()=>{document.getElementById('dnst').textContent='Error';});
 }
+function setSim(s){
+  document.getElementById('sst').textContent='Saving...';
+  fetch('/setsim?sim='+s,{cache:'no-store'})
+    .then(r=>r.text()).then(t=>{document.getElementById('sst').textContent=t;})
+    .catch(()=>{document.getElementById('sst').textContent='Error';});
+}
 function pollData(){
   if(busy)return;busy=true;
   fetch('/data',{cache:'no-store'}).then(r=>r.json()).then(d=>{
@@ -852,6 +867,8 @@ function pollData(){
     f('fl_st',d.standstill,'Stationary');
     f('fl_cl',d.client,'Client');
     for(var i=1;i<=3;i++)document.getElementById('mb'+i).className='mbtn'+(d.mode==i?' act':'');
+    document.getElementById('sb0').className='mbtn'+(d.sim?'':' act');
+    document.getElementById('sb1').className='mbtn'+(d.sim?' act':'');
     if(!nameFocused){
       document.getElementById('dname').value=d.base_name||'';
       document.getElementById('dnprev').textContent='BLE name: '+d.device_name;
@@ -931,6 +948,28 @@ static void handleSetName() {
     ESP.restart();
 }
 
+static void handleSetSim() {
+    if (!webServer.hasArg("sim")) {
+        webServer.send(400, "text/plain", "Missing sim parameter");
+        return;
+    }
+    int s = webServer.arg("sim").toInt();
+    if (s != 0 && s != 1) {
+        webServer.send(400, "text/plain", "sim must be 0 or 1");
+        return;
+    }
+    Preferences prefs;
+    prefs.begin("ebike", false);
+    prefs.putUChar("sim", (uint8_t)s);
+    prefs.end();
+
+    webServer.sendHeader("Cache-Control", "no-store");
+    webServer.send(200, "text/plain",
+        s ? "Simulation enabled. Rebooting..." : "Simulation disabled. Rebooting...");
+    delay(300);
+    ESP.restart();
+}
+
 static const char UPDATE_HTML[] PROGMEM = R"html(<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -984,7 +1023,7 @@ static void handleData() {
         "\"bridge_battery\":%u,\"bridge_battery_mv\":%u,"
         "\"odometer\":%.2f,\"ambient\":%.1f,\"bike_light\":%d,"
         "\"locked\":%s,\"charger\":%s,\"reserve\":%s,\"diag\":%s,\"standstill\":%s}",
-        SIM_ENABLED     ? "true" : "false",
+        gSimEnabled     ? "true" : "false",
         (int)gMode,
         gBaseDeviceName,
         gDeviceName,
@@ -1017,6 +1056,7 @@ static void startWebDebug() {
     webServer.on("/status",  handleStatus);
     webServer.on("/setmode", handleSetMode);
     webServer.on("/setname", handleSetName);
+    webServer.on("/setsim",  handleSetSim);
     webServer.on("/update",  HTTP_GET,  handleUpdatePage);
     webServer.on("/update",  HTTP_POST, handleUpdateDone, handleUpdateUpload);
     webServer.begin();
@@ -1063,6 +1103,7 @@ void setup() {
         uint8_t stored = prefs.getUChar("mode", (uint8_t)DEFAULT_MODE);
         if (stored >= 1 && stored <= 3) gMode = (FirmwareMode)stored;
         prefs.getString("dname", "BoschEBike").toCharArray(gBaseDeviceName, sizeof(gBaseDeviceName));
+        gSimEnabled = prefs.getUChar("sim", 0) != 0;
         prefs.end();
     }
     buildDeviceName();
@@ -1115,7 +1156,7 @@ void setup() {
         svc->start();
     }
 
-    if (SIM_ENABLED) {
+    if (gSimEnabled) {
         startAdvertisingForClient();
     } else {
         resetAndAdvertiseForEbike();
@@ -1132,7 +1173,7 @@ void loop() {
         manageWebPower();
     }
 
-    if (!SIM_ENABLED) {
+    if (!gSimEnabled) {
         if (flagEbikeDisconn) {
             flagEbikeDisconn = false;
             resetAndAdvertiseForEbike();
@@ -1160,16 +1201,16 @@ void loop() {
         flagClientDisconn = false;
         clientConnected   = false;
         nextSimNotifyMs   = nextNoEbikeNotifyMs = 0;
-        if (SIM_ENABLED || ebikeGattReady) startAdvertisingForClient();
+        if (gSimEnabled || ebikeGattReady) startAdvertisingForClient();
     }
 
-    if (!SIM_ENABLED && clientConnected && !ebikeConnected &&
+    if (!gSimEnabled && clientConnected && !ebikeConnected &&
         (int32_t)(millis() - nextNoEbikeNotifyMs) >= 0) {
         notifyNoEbikeData();
         nextNoEbikeNotifyMs = millis() + 1000;
     }
 
-    if (SIM_ENABLED && clientConnected &&
+    if (gSimEnabled && clientConnected &&
         (int32_t)(millis() - nextSimNotifyMs) >= 0) {
         generateAndNotifySimData();
         nextSimNotifyMs = millis() + 500;
