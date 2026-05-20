@@ -393,22 +393,26 @@ static void notifyCpsCombinedData() {
     if (dt > 0 && dt < 5000) {
         float dtSec = dt / 1000.0f;
         if (gData.speedKmh > 0.1f) {
-            float speedMs = gData.speedKmh / 3.6f;
-            cscWheelRevFrac += speedMs * dtSec / (WHEEL_CIRCUMFERENCE_MM / 1000.0f);
+            float revPerSec = (gData.speedKmh / 3.6f) / (WHEEL_CIRCUMFERENCE_MM / 1000.0f);
+            cscWheelRevFrac += revPerSec * dtSec;
             uint32_t newRevs = (uint32_t)cscWheelRevFrac;
             if (newRevs > 0) {
                 cscWheelRevFrac  -= newRevs;
                 cscWheelRevTotal += newRevs;
-                cpsCombWheelEventT = (uint16_t)(((uint64_t)now * 2048) / 1000);
+                // Interpolate: the last revolution completed (frac/revPerSec) seconds ago.
+                uint32_t eventMs = now - (uint32_t)(cscWheelRevFrac / revPerSec * 1000.0f);
+                cpsCombWheelEventT = (uint16_t)(((uint64_t)eventMs * 2048) / 1000);
             }
         }
         if (gData.cadenceRpm > 0) {
-            cscCrankRevFrac += gData.cadenceRpm / 60.0f * dtSec;
+            float crankRevPerSec = gData.cadenceRpm / 60.0f;
+            cscCrankRevFrac += crankRevPerSec * dtSec;
             uint16_t newRevs = (uint16_t)cscCrankRevFrac;
             if (newRevs > 0) {
                 cscCrankRevFrac   -= newRevs;
                 cscCrankRevTotal  += newRevs;
-                cscLastCrankEventT = (uint16_t)(((uint64_t)now * 1024) / 1000);
+                uint32_t eventMs = now - (uint32_t)(cscCrankRevFrac / crankRevPerSec * 1000.0f);
+                cscLastCrankEventT = (uint16_t)(((uint64_t)eventMs * 1024) / 1000);
             }
         }
     }
@@ -442,24 +446,26 @@ static void notifyCscData() {
         float dtSec = dt / 1000.0f;
 
         if (gData.speedKmh > 0.1f) {
-            float speedMs = gData.speedKmh / 3.6f;
-            cscWheelRevFrac += speedMs * dtSec / (WHEEL_CIRCUMFERENCE_MM / 1000.0f);
+            float revPerSec = (gData.speedKmh / 3.6f) / (WHEEL_CIRCUMFERENCE_MM / 1000.0f);
+            cscWheelRevFrac += revPerSec * dtSec;
             uint32_t newRevs = (uint32_t)cscWheelRevFrac;
             if (newRevs > 0) {
-                cscWheelRevFrac -= newRevs;
+                cscWheelRevFrac  -= newRevs;
                 cscWheelRevTotal += newRevs;
-                // Timestamp of last wheel event in 1/1024 s units (wraps uint16)
-                cscLastWheelEventT = (uint16_t)(((uint64_t)now * 1024) / 1000);
+                uint32_t eventMs = now - (uint32_t)(cscWheelRevFrac / revPerSec * 1000.0f);
+                cscLastWheelEventT = (uint16_t)(((uint64_t)eventMs * 1024) / 1000);
             }
         }
 
         if (gData.cadenceRpm > 0) {
-            cscCrankRevFrac += gData.cadenceRpm / 60.0f * dtSec;
+            float crankRevPerSec = gData.cadenceRpm / 60.0f;
+            cscCrankRevFrac += crankRevPerSec * dtSec;
             uint16_t newRevs = (uint16_t)cscCrankRevFrac;
             if (newRevs > 0) {
-                cscCrankRevFrac -= newRevs;
+                cscCrankRevFrac  -= newRevs;
                 cscCrankRevTotal += newRevs;
-                cscLastCrankEventT = (uint16_t)(((uint64_t)now * 1024) / 1000);
+                uint32_t eventMs = now - (uint32_t)(cscCrankRevFrac / crankRevPerSec * 1000.0f);
+                cscLastCrankEventT = (uint16_t)(((uint64_t)eventMs * 1024) / 1000);
             }
         }
     }
