@@ -63,6 +63,20 @@ static const FirmwareMode DEFAULT_MODE = MODE_SUUNTO_BRIDGE;
 
 static FirmwareMode gMode = DEFAULT_MODE;
 
+// ─── Device name ──────────────────────────────────────────────────────────────
+// The full BLE device name is "<base> Bridge|Power|SpeedCadence".
+// gBaseDeviceName is stored in NVS (key "dname"); gDeviceName is composed at
+// boot and used everywhere (NimBLEDevice::init, advertising scan response).
+static char gBaseDeviceName[21] = "BoschEBike";  // max 20 chars + null
+static char gDeviceName[34]     = {};             // base + longest suffix " SpeedCadence"
+
+static void buildDeviceName() {
+    const char* suffix =
+        gMode == MODE_SUUNTO_BRIDGE ? " Bridge"       :
+        gMode == MODE_POWER_SENSOR  ? " Power"        : " SpeedCadence";
+    snprintf(gDeviceName, sizeof(gDeviceName), "%s%s", gBaseDeviceName, suffix);
+}
+
 // ─── Simulation (debug) ───────────────────────────────────────────────────────
 // true  → client connects immediately, ESP32 generates fake data
 // false → normal flow: bike first, then client with real data
@@ -626,7 +640,7 @@ static void startAdvertisingForEbike() {
     advData.addData(std::string((const char*)payload, sizeof(payload)));
     adv->setAdvertisementData(advData);
     NimBLEAdvertisementData scan;
-    scan.setName("BoschEBike Bridge");
+    scan.setName(gDeviceName);
     adv->setScanResponseData(scan);
     adv->setScanResponse(true);
     adv->setMinInterval(0x0050);
@@ -649,7 +663,7 @@ static void startAdvertisingForClient() {
             0xe9,0x11,0xa2,0xea,0x20,0xeb,0x00,0x00
         };
         advData.addData(std::string((const char*)payload, sizeof(payload)));
-        scan.setName("BoschEBike");
+        scan.setName(gDeviceName);
     } else {
         // AD type 0x03: Complete List of 16-bit Service UUIDs
         uint16_t uuid16 = (gMode == MODE_POWER_SENSOR) ? 0x1818 : 0x1816;
@@ -659,7 +673,7 @@ static void startAdvertisingForClient() {
             (uint8_t)(uuid16 & 0xFF), (uint8_t)(uuid16 >> 8)
         };
         advData.addData(std::string((const char*)payload, sizeof(payload)));
-        scan.setName(gMode == MODE_POWER_SENSOR ? "BoschEBike Power" : "BoschEBike SC");
+        scan.setName(gDeviceName);
     }
 
     adv->setAdvertisementData(advData);
@@ -734,6 +748,15 @@ h1{color:#58a6ff;font-size:18px;margin:0 0 4px}
   padding:6px 14px;cursor:pointer;font-family:monospace;font-size:12px;margin:3px}
 .mbtn.act{background:#1f6feb;border-color:#1f6feb}
 #mst{font-size:11px;color:#8b949e;margin-top:6px;min-height:16px}
+.dinput{display:flex;gap:6px;margin-top:6px;align-items:center}
+.dinput input{background:#0d1117;color:#e6edf3;border:1px solid #30363d;border-radius:6px;
+  padding:5px 10px;font-family:monospace;font-size:13px;flex:1;min-width:0}
+.dinput input:focus{outline:none;border-color:#58a6ff}
+.dinput button{background:#21262d;color:#e6edf3;border:1px solid #30363d;border-radius:6px;
+  padding:5px 12px;cursor:pointer;font-family:monospace;font-size:12px;white-space:nowrap}
+.dinput button:hover{background:#30363d}
+#dnprev{font-size:11px;color:#58a6ff;margin-top:4px;min-height:16px}
+#dnst{font-size:11px;color:#8b949e;margin-top:2px;min-height:16px}
 #ts{margin-top:10px;color:#484f58;font-size:11px}
 </style></head><body>
 <h1>BoschEBike Bridge</h1>
@@ -765,11 +788,29 @@ h1{color:#58a6ff;font-size:18px;margin:0 0 4px}
   </div>
   <div id="mst"></div>
 </div>
+<div class="msect">
+  <div class="lbl">DEVICE SETTINGS</div>
+  <div class="dinput">
+    <input type="text" id="dname" maxlength="20" placeholder="BoschEBike" autocomplete="off" spellcheck="false">
+    <button onclick="saveName()">Save &amp; Reboot</button>
+  </div>
+  <div id="dnprev"></div>
+  <div id="dnst"></div>
+</div>
 <div id="ts"></div>
 <script>
 const LT=['−','OFF','ON'];
 const MN=['','Suunto Bridge','Power Sensor','Speed & Cadence'];
+const MS=['',' Bridge',' Power',' SpeedCadence'];
 let busy=false;
+let nameFocused=false;
+document.getElementById('dname').addEventListener('focus',()=>{nameFocused=true;});
+document.getElementById('dname').addEventListener('blur',()=>{nameFocused=false;});
+document.getElementById('dname').addEventListener('input',function(){
+  var sfx=MS[currentMode]||'';
+  document.getElementById('dnprev').textContent=this.value?'BLE name: '+this.value+sfx:'';
+});
+var currentMode=1;
 function f(id,on,txt){var e=document.getElementById(id);e.textContent=txt;e.className='f '+(on?'on':'off');}
 function setMode(m){
   document.getElementById('mst').textContent='Saving...';
@@ -777,9 +818,18 @@ function setMode(m){
     .then(r=>r.text()).then(t=>{document.getElementById('mst').textContent=t;})
     .catch(()=>{document.getElementById('mst').textContent='Error';});
 }
+function saveName(){
+  var n=document.getElementById('dname').value.trim();
+  if(!n){document.getElementById('dnst').textContent='Name cannot be empty';return;}
+  document.getElementById('dnst').textContent='Saving...';
+  fetch('/setname?name='+encodeURIComponent(n),{cache:'no-store'})
+    .then(r=>r.text()).then(t=>{document.getElementById('dnst').textContent=t;})
+    .catch(()=>{document.getElementById('dnst').textContent='Error';});
+}
 function pollData(){
   if(busy)return;busy=true;
   fetch('/data',{cache:'no-store'}).then(r=>r.json()).then(d=>{
+    currentMode=d.mode;
     var s=document.getElementById('st');
     var mn='['+MN[d.mode]+']';
     if(d.sim){s.style.color='#a371f7';s.textContent='SIMULATION '+mn+' | Client: '+(d.client?'connected':'advertising');}
@@ -802,6 +852,10 @@ function pollData(){
     f('fl_st',d.standstill,'Stationary');
     f('fl_cl',d.client,'Client');
     for(var i=1;i<=3;i++)document.getElementById('mb'+i).className='mbtn'+(d.mode==i?' act':'');
+    if(!nameFocused){
+      document.getElementById('dname').value=d.base_name||'';
+      document.getElementById('dnprev').textContent='BLE name: '+d.device_name;
+    }
   }).catch(()=>{document.getElementById('st').textContent='Web connection error';})
     .finally(()=>{busy=false;});
 }
@@ -841,6 +895,36 @@ static void handleSetMode() {
     const char* names[] = { "", "Suunto Bridge", "Power Sensor", "Speed & Cadence" };
     char buf[64];
     snprintf(buf, sizeof(buf), "Mode set to %s. Rebooting...", names[m]);
+    webServer.sendHeader("Cache-Control", "no-store");
+    webServer.send(200, "text/plain", buf);
+    delay(300);
+    ESP.restart();
+}
+
+static void handleSetName() {
+    if (!webServer.hasArg("name")) {
+        webServer.send(400, "text/plain", "Missing name");
+        return;
+    }
+    String name = webServer.arg("name");
+    name.trim();
+    if (name.length() == 0 || name.length() > 20) {
+        webServer.send(400, "text/plain", "Name must be 1-20 characters");
+        return;
+    }
+    for (char c : name) {
+        if (!isalnum(c) && c != ' ' && c != '-' && c != '_') {
+            webServer.send(400, "text/plain", "Only letters, digits, spaces, - and _ allowed");
+            return;
+        }
+    }
+    Preferences prefs;
+    prefs.begin("ebike", false);
+    prefs.putString("dname", name);
+    prefs.end();
+
+    char buf[64];
+    snprintf(buf, sizeof(buf), "Name set to \"%s\". Rebooting...", name.c_str());
     webServer.sendHeader("Cache-Control", "no-store");
     webServer.send(200, "text/plain", buf);
     delay(300);
@@ -892,15 +976,18 @@ static void handleUpdateDone() {
 
 static void handleData() {
     LiveData d = gData;
-    char buf[768];
+    char buf[820];
     snprintf(buf, sizeof(buf),
-        "{\"sim\":%s,\"mode\":%d,\"ebike\":%s,\"gatt\":%s,\"client\":%s,\"valid\":%s,"
+        "{\"sim\":%s,\"mode\":%d,\"base_name\":\"%s\",\"device_name\":\"%s\","
+        "\"ebike\":%s,\"gatt\":%s,\"client\":%s,\"valid\":%s,"
         "\"speed\":%.2f,\"cadence\":%d,\"power\":%d,\"battery\":%d,"
         "\"bridge_battery\":%u,\"bridge_battery_mv\":%u,"
         "\"odometer\":%.2f,\"ambient\":%.1f,\"bike_light\":%d,"
         "\"locked\":%s,\"charger\":%s,\"reserve\":%s,\"diag\":%s,\"standstill\":%s}",
         SIM_ENABLED     ? "true" : "false",
         (int)gMode,
+        gBaseDeviceName,
+        gDeviceName,
         ebikeConnected  ? "true" : "false",
         ebikeGattReady  ? "true" : "false",
         clientConnected ? "true" : "false",
@@ -929,6 +1016,7 @@ static void startWebDebug() {
     webServer.on("/data",    handleData);
     webServer.on("/status",  handleStatus);
     webServer.on("/setmode", handleSetMode);
+    webServer.on("/setname", handleSetName);
     webServer.on("/update",  HTTP_GET,  handleUpdatePage);
     webServer.on("/update",  HTTP_POST, handleUpdateDone, handleUpdateUpload);
     webServer.begin();
@@ -968,14 +1056,16 @@ void setup() {
     Serial.begin(115200);
     startStartupLed();
 
-    // Load operating mode from NVS (falls back to DEFAULT_MODE on first boot)
+    // Load settings from NVS (falls back to defaults on first boot)
     {
         Preferences prefs;
         prefs.begin("ebike", true);
         uint8_t stored = prefs.getUChar("mode", (uint8_t)DEFAULT_MODE);
-        prefs.end();
         if (stored >= 1 && stored <= 3) gMode = (FirmwareMode)stored;
+        prefs.getString("dname", "BoschEBike").toCharArray(gBaseDeviceName, sizeof(gBaseDeviceName));
+        prefs.end();
     }
+    buildDeviceName();
 
     analogReadResolution(12);
     analogSetPinAttenuation(BATTERY_ADC_PIN, ADC_11db);
@@ -983,11 +1073,7 @@ void setup() {
 
     startWebDebug();
 
-    const char* devName =
-        gMode == MODE_SUUNTO_BRIDGE ? "BoschEBike Bridge" :
-        gMode == MODE_POWER_SENSOR  ? "BoschEBike Power"  : "BoschEBike SC";
-
-    NimBLEDevice::init(devName);
+    NimBLEDevice::init(gDeviceName);
     NimBLEDevice::setSecurityAuth(BLE_SM_PAIR_AUTHREQ_SC | BLE_SM_PAIR_AUTHREQ_BOND);
     NimBLEDevice::setSecurityIOCap(BLE_HS_IO_NO_INPUT_OUTPUT);
     NimBLEDevice::setPower(ESP_PWR_LVL_P9);
