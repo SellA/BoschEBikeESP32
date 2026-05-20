@@ -287,6 +287,13 @@ static void updateBridgeBattery(bool force = false) {
     bridgeBatteryPercent = lipoPercentFromMv(bridgeBatteryMv);
 }
 
+// ─── CPS state ───────────────────────────────────────────────────────────────
+// Crank length in 1/10 mm units (1725 = 172.5 mm, a common default).
+// Updated via Cycling Power Control Point opcode 0x04.
+// Power data comes from the eBike, so this value is only stored and reported
+// back to the client — it has no effect on the power calculation.
+static uint16_t cpsCrankLengthTenthMm = 1725;
+
 // ─── CSC accumulator state ────────────────────────────────────────────────────
 static float    cscWheelRevFrac    = 0.0f;
 static uint32_t cscWheelRevTotal   = 0;
@@ -787,6 +794,50 @@ static void resetAndAdvertiseForEbike() {
     cscLastUpdateMs = 0;
     startAdvertisingForEbike();
 }
+
+// ─── Cycling Power Control Point callbacks (CPS mode) ────────────────────────
+// The Cycling Power Control Point (0x2A66) is mandatory when CPS Feature bit 14
+// (Crank Length Adjustment Supported) is set. Fitness clients use it to configure
+// and verify crank length during pairing; without it they consider the sensor
+// non-compliant and may not offer it in cycling activities.
+// We implement opcodes 0x04 (Set Crank Length) and 0x05 (Request Crank Length).
+// All other opcodes get "Op Code Not Supported" (0x02). The crank length value
+// is stored but has no effect on power output — power comes from the eBike.
+class CpControlPointCB : public NimBLECharacteristicCallbacks {
+    void onWrite(NimBLECharacteristic* pChar) override {
+        std::string val = pChar->getValue();
+        if (val.empty()) return;
+        uint8_t opcode   = (uint8_t)val[0];
+        uint8_t respCode = 0x01;  // Success
+        uint8_t extra[2] = {};
+        int     extraLen = 0;
+
+        switch (opcode) {
+            case 0x04:  // Set Crank Length (param: uint16_t, 1/10 mm)
+                if (val.size() >= 3) {
+                    cpsCrankLengthTenthMm = (uint8_t)val[1] | ((uint8_t)val[2] << 8);
+                    dblog("CPCP: set crank=%u (1/10mm)", cpsCrankLengthTenthMm);
+                } else {
+                    respCode = 0x03;  // Invalid Parameter
+                }
+                break;
+            case 0x05:  // Request Crank Length — respond with current value
+                extra[0] = (uint8_t)(cpsCrankLengthTenthMm & 0xFF);
+                extra[1] = (uint8_t)(cpsCrankLengthTenthMm >> 8);
+                extraLen = 2;
+                dblog("CPCP: request crank=%u", cpsCrankLengthTenthMm);
+                break;
+            default:
+                respCode = 0x02;  // Op Code Not Supported
+                dblog("CPCP: opcode=0x%02x not supported", opcode);
+                break;
+        }
+
+        uint8_t resp[5] = { 0x20, opcode, respCode, extra[0], extra[1] };
+        pChar->setValue(resp, 3 + extraLen);
+        pChar->indicate();
+    }
+};
 
 // ─── SC Control Point callbacks (CSC mode) ────────────────────────────────────
 // The SC Control Point (0x2A55) is mandatory when Wheel Revolution Data is
@@ -1326,12 +1377,21 @@ void setup() {
                                                NIMBLE_PROPERTY::READ);
         auto* feat = svc->createCharacteristic(NimBLEUUID((uint16_t)0x2A65),
                                                 NIMBLE_PROPERTY::READ);
-        uint32_t featVal = 0x00000000;
+        // Bit 14: Crank Length Adjustment Supported — makes Cycling Power
+        // Control Point (0x2A66) mandatory and prompts fitness clients to ask
+        // for crank length during pairing, properly classifying this as a
+        // power POD rather than a generic sensor.
+        uint32_t featVal = 0x00004000;
         feat->setValue((uint8_t*)&featVal, 4);
         auto* loc = svc->createCharacteristic(NimBLEUUID((uint16_t)0x2A5D),
                                                NIMBLE_PROPERTY::READ);
         uint8_t locVal = 0x00;  // Other
         loc->setValue(&locVal, 1);
+        // Cycling Power Control Point: mandatory when bit 14 of CPS Feature is set
+        auto* cpcp = svc->createCharacteristic(NimBLEUUID((uint16_t)0x2A66),
+                                                NIMBLE_PROPERTY::WRITE |
+                                                NIMBLE_PROPERTY::INDICATE);
+        cpcp->setCallbacks(new CpControlPointCB());
         svc->start();
     } else {
         // Use explicit 16-bit UUIDs (see CPS comment above).
