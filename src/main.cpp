@@ -48,6 +48,7 @@
 #include <Update.h>
 #include <Preferences.h>
 #include <NimBLEDevice.h>
+#include <stdarg.h>
 #include "nimble/nimble/host/include/host/ble_gatt.h"
 #include "nimble/nimble/host/include/host/ble_hs_mbuf.h"
 
@@ -82,6 +83,32 @@ static void buildDeviceName() {
 // immediately for the client, without connecting to a real bike.
 // Toggled via web UI (/setsim) and stored in NVS key "sim".
 static bool gSimEnabled = false;
+
+// ─── BLE Debug Log ────────────────────────────────────────────────────────────
+// Toggled via web UI (/setdebug) and stored in NVS key "bdbg".
+// Events are written to a fixed-size ring buffer in RAM and served as plain
+// text at GET /log — readable from a browser or via WebFetch at 192.168.4.1.
+static bool gBleDebug = false;
+
+static const int DBLOG_ENTRIES = 100;
+static const int DBLOG_LINE    = 80;   // 12 chars timestamp + 67 chars message
+
+static char     dblogBuf[DBLOG_ENTRIES][DBLOG_LINE];
+static int      dblogHead      = 0;    // next write slot (oldest when full)
+static int      dblogCount     = 0;
+static uint32_t dblogLastLdiMs = 0;    // rate-limit for LDI data entries
+
+static void dblog(const char* fmt, ...) {
+    if (!gBleDebug) return;
+    char tmp[DBLOG_LINE];
+    int n = snprintf(tmp, sizeof(tmp), "[%9lu] ", (unsigned long)millis());
+    va_list ap; va_start(ap, fmt);
+    vsnprintf(tmp + n, sizeof(tmp) - n, fmt, ap);
+    va_end(ap);
+    strlcpy(dblogBuf[dblogHead], tmp, DBLOG_LINE);
+    dblogHead = (dblogHead + 1) % DBLOG_ENTRIES;
+    if (dblogCount < DBLOG_ENTRIES) dblogCount++;
+}
 
 #define WIFI_AP_SSID "BoschEBike Bridge"
 #define WIFI_AP_PASS "password"
@@ -387,6 +414,16 @@ static void notifyCscData() {
 
 static void handleLdiPayload(const uint8_t* data, size_t len) {
     decodeLiveData(data, len);
+    // Rate-limited log: at most one entry every 10 s so the buffer is not flooded
+    uint32_t nowL = millis();
+    if (nowL - dblogLastLdiMs >= 10000) {
+        dblogLastLdiMs = nowL;
+        char hex[13]; int hi = 0;
+        for (size_t j = 0; j < len && j < 6; j++)
+            hi += snprintf(hex + hi, sizeof(hex) - hi, "%02x", data[j]);
+        dblog("LDI: %uB spd=%.1f pwr=%d bat=%d [%s]",
+              (unsigned)len, gData.speedKmh, gData.powerW, gData.batterySoc, hex);
+    }
     if      (gMode == MODE_SUUNTO_BRIDGE) notifyLdiData(data, len);
     else if (gMode == MODE_POWER_SENSOR)  notifyCpsData();
     else                                  notifyCscData();
@@ -440,6 +477,7 @@ static void notifyNoEbikeData() {
 static int gattWriteCccdCB(uint16_t, const struct ble_gatt_error* error,
                            struct ble_gatt_attr*, void*) {
     if (error->status == 0) {
+        dblog("GATT: CCCD write OK, GATT ready");
         ebikeGattReady      = true;
         gattDiscoveryActive = false;
         nextGattRetryMs     = 0;
@@ -448,6 +486,7 @@ static int gattWriteCccdCB(uint16_t, const struct ble_gatt_error* error,
         cscLastUpdateMs = 0;
         if (!clientConnected) startAdvertisingForClient();
     } else {
+        dblog("GATT: CCCD write err %d, retry 3s", error->status);
         gattDiscoveryActive = false;
         nextGattRetryMs     = millis() + 3000;
     }
@@ -461,16 +500,19 @@ static int gattDscCB(uint16_t connHandle, const struct ble_gatt_error* error,
     if (error->status == 0 && dsc &&
         ble_uuid_cmp(&dsc->uuid.u, &CCCD_UUID_RAW.u) == 0) {
         ldiCccdHandle = dsc->handle;
+        dblog("GATT: CCCD h=%u", dsc->handle);
         return 0;
     }
     if (error->status == BLE_HS_EDONE) {
         if (ldiCccdHandle == 0) {
+            dblog("GATT: CCCD not found, retry 3s");
             gattDiscoveryActive = false;
             nextGattRetryMs = millis() + 3000;
             return 0;
         }
         writeLdiCccd(connHandle);
     } else if (error->status != 0) {
+        dblog("GATT: dsc err %d, retry 3s", error->status);
         gattDiscoveryActive = false;
         nextGattRetryMs = millis() + 3000;
     }
@@ -483,6 +525,7 @@ static void writeLdiCccd(uint16_t connHandle) {
         nextGattRetryMs = millis() + 3000;
         return;
     }
+    dblog("GATT: write CCCD h=%u notify-ON", ldiCccdHandle);
     const uint16_t notifyOn = 0x0001;
     int rc = ble_gattc_write_flat(connHandle, ldiCccdHandle,
                                   &notifyOn, sizeof(notifyOn),
@@ -497,10 +540,12 @@ static int gattChrCB(uint16_t connHandle, const struct ble_gatt_error* error,
                      const struct ble_gatt_chr* chr, void*) {
     if (error->status == 0 && chr) {
         ldiCharHandle = chr->val_handle;
+        dblog("GATT: LDI chr h=%u", chr->val_handle);
         return 0;
     }
     if (error->status == BLE_HS_EDONE) {
         if (ldiCharHandle == 0) {
+            dblog("GATT: LDI chr not found, retry 3s");
             gattDiscoveryActive = false;
             nextGattRetryMs = millis() + 3000;
             return 0;
@@ -509,14 +554,17 @@ static int gattChrCB(uint16_t connHandle, const struct ble_gatt_error* error,
                                          ldiSvcEnd, gattDscCB, nullptr);
         if (rc != 0) {
             if (ldiCharHandle + 1 <= ldiSvcEnd) {
+                dblog("GATT: dsc disc fail, CCCD fallback h=%u", ldiCharHandle + 1);
                 ldiCccdHandle = ldiCharHandle + 1;
                 writeLdiCccd(connHandle);
             } else {
+                dblog("GATT: chr err %d, retry 3s", error->status);
                 gattDiscoveryActive = false;
                 nextGattRetryMs = millis() + 3000;
             }
         }
     } else if (error->status != 0) {
+        dblog("GATT: chr err %d, retry 3s", error->status);
         gattDiscoveryActive = false;
         nextGattRetryMs = millis() + 3000;
     }
@@ -528,10 +576,12 @@ static int gattSvcCB(uint16_t connHandle, const struct ble_gatt_error* error,
     if (error->status == 0 && service) {
         ldiSvcStart = service->start_handle;
         ldiSvcEnd   = service->end_handle;
+        dblog("GATT: LDI svc [%u..%u]", service->start_handle, service->end_handle);
         return 0;
     }
     if (error->status == BLE_HS_EDONE) {
         if (ldiSvcStart == 0 || ldiSvcEnd == 0) {
+            dblog("GATT: LDI svc not found, restarting");
             gattDiscoveryActive = false;
             ebikeConnected      = false;
             ebikeEncrypted      = false;
@@ -544,10 +594,12 @@ static int gattSvcCB(uint16_t connHandle, const struct ble_gatt_error* error,
         int rc = ble_gattc_disc_chrs_by_uuid(connHandle, ldiSvcStart, ldiSvcEnd,
                                              &LDI_CHAR_UUID_RAW.u, gattChrCB, nullptr);
         if (rc != 0) {
+            dblog("GATT: chr disc fail err %d, retry 3s", rc);
             gattDiscoveryActive = false;
             nextGattRetryMs = millis() + 3000;
         }
     } else if (error->status != 0) {
+        dblog("GATT: svc err %d, retry 3s", error->status);
         gattDiscoveryActive = false;
         nextGattRetryMs = millis() + 3000;
     }
@@ -567,6 +619,7 @@ static void startLdiServiceDiscovery(uint16_t connHandle) {
 static int gattMtuCB(uint16_t connHandle, const struct ble_gatt_error*,
                      uint16_t mtu, void*) {
     lastMtu = mtu;
+    dblog("GATT: MTU=%u, svc discovery", mtu);
     startLdiServiceDiscovery(connHandle);
     return 0;
 }
@@ -578,6 +631,9 @@ static int customGapHandler(struct ble_gap_event* event, void*) {
         int rc = ble_gap_conn_find(ebikeConnHandle, &desc);
         ebikeEncrypted = (event->enc_change.status == 0 && rc == 0 &&
                           desc.sec_state.encrypted);
+        dblog("ENC: h=%u enc=%d status=%d",
+              event->enc_change.conn_handle, (int)ebikeEncrypted,
+              event->enc_change.status);
         if (ebikeEncrypted && gattStartPending) {
             gattStartPending = false;
             openGattClient();
@@ -604,9 +660,12 @@ class ServerCB : public NimBLEServerCallbacks {
             ebikeConnected  = true;
             ebikeEncrypted  = desc->sec_state.encrypted;
             flagEbikePeripheralConn = true;
+            dblog("CONN: eBike h=%u enc=%d", desc->conn_handle,
+                  (int)desc->sec_state.encrypted);
         } else {
             clientConnHandle = desc->conn_handle;
             flagClientConn   = true;
+            dblog("CONN: Client h=%u", desc->conn_handle);
         }
     }
     void onDisconnect(NimBLEServer*, ble_gap_conn_desc* desc) override {
@@ -618,10 +677,12 @@ class ServerCB : public NimBLEServerCallbacks {
             gattStartPending    = false;
             ebikeConnHandle     = BLE_HS_CONN_HANDLE_NONE;
             flagEbikeDisconn    = true;
+            dblog("DISC: eBike h=%u", desc->conn_handle);
         } else {
             if (desc->conn_handle == clientConnHandle)
                 clientConnHandle = BLE_HS_CONN_HANDLE_NONE;
             flagClientDisconn = true;
+            dblog("DISC: Client h=%u", desc->conn_handle);
         }
     }
     bool onConfirmPIN(uint32_t) override { return true; }
@@ -629,6 +690,7 @@ class ServerCB : public NimBLEServerCallbacks {
 
 // ─── BLE advertising ──────────────────────────────────────────────────────────
 static void startAdvertisingForEbike() {
+    dblog("ADV: eBike solicitation started");
     auto* adv = NimBLEDevice::getAdvertising();
     adv->reset();
     const uint8_t payload[] = {
@@ -650,6 +712,7 @@ static void startAdvertisingForEbike() {
 }
 
 static void startAdvertisingForClient() {
+    dblog("ADV: client started mode=%d", (int)gMode);
     auto* adv = NimBLEDevice::getAdvertising();
     adv->reset();
     NimBLEAdvertisementData advData;
@@ -690,6 +753,7 @@ static bool openGattClient() {
     struct ble_gap_conn_desc desc;
     if (ble_gap_conn_find(ebikeConnHandle, &desc) != 0) return false;
     ebikeEncrypted = desc.sec_state.encrypted;
+    dblog("GATT: open client h=%u enc=%d", ebikeConnHandle, (int)ebikeEncrypted);
     gattStartPending    = false;
     ebikeGattReady      = false;
     gattDiscoveryActive = true;
@@ -702,6 +766,7 @@ static bool openGattClient() {
 }
 
 static void resetAndAdvertiseForEbike() {
+    dblog("RESET: full reset, adv for eBike");
     ebikeConnected      = ebikeGattReady = false;
     gattDiscoveryActive = ebikeEncrypted = gattStartPending = false;
     ebikeConnHandle     = BLE_HS_CONN_HANDLE_NONE;
@@ -806,6 +871,16 @@ h1{color:#58a6ff;font-size:18px;margin:0 0 4px}
   </div>
   <div id="sst" style="font-size:11px;color:#8b949e;margin-top:6px;min-height:16px"></div>
 </div>
+<div class="msect">
+  <div class="lbl">BLE DEBUG LOG</div>
+  <div style="margin-top:6px;display:flex;align-items:center;flex-wrap:wrap;gap:4px">
+    <button class="mbtn" id="db0" onclick="setDebug(0)">Disabled</button>
+    <button class="mbtn" id="db1" onclick="setDebug(1)">Enabled</button>
+    <a href="/log" target="_blank" style="color:#58a6ff;font-size:12px;margin-left:6px;text-decoration:none">View log &#x2197;</a>
+    <button class="mbtn" onclick="clearLog()">Clear</button>
+  </div>
+  <div id="dbst" style="font-size:11px;color:#8b949e;margin-top:6px;min-height:16px"></div>
+</div>
 <div id="ts"></div>
 <script>
 const LT=['−','OFF','ON'];
@@ -841,6 +916,17 @@ function setSim(s){
     .then(r=>r.text()).then(t=>{document.getElementById('sst').textContent=t;})
     .catch(()=>{document.getElementById('sst').textContent='Error';});
 }
+function setDebug(d){
+  document.getElementById('dbst').textContent='Saving...';
+  fetch('/setdebug?debug='+d,{cache:'no-store'})
+    .then(r=>r.text()).then(t=>{document.getElementById('dbst').textContent=t;})
+    .catch(()=>{document.getElementById('dbst').textContent='Error';});
+}
+function clearLog(){
+  fetch('/clearlog',{cache:'no-store'})
+    .then(r=>r.text()).then(t=>{document.getElementById('dbst').textContent=t;})
+    .catch(()=>{document.getElementById('dbst').textContent='Error';});
+}
 function pollData(){
   if(busy)return;busy=true;
   fetch('/data',{cache:'no-store'}).then(r=>r.json()).then(d=>{
@@ -869,6 +955,8 @@ function pollData(){
     for(var i=1;i<=3;i++)document.getElementById('mb'+i).className='mbtn'+(d.mode==i?' act':'');
     document.getElementById('sb0').className='mbtn'+(d.sim?'':' act');
     document.getElementById('sb1').className='mbtn'+(d.sim?' act':'');
+    document.getElementById('db0').className='mbtn'+(d.debug?'':' act');
+    document.getElementById('db1').className='mbtn'+(d.debug?' act':'');
     if(!nameFocused){
       document.getElementById('dname').value=d.base_name||'';
       document.getElementById('dnprev').textContent='BLE name: '+d.device_name;
@@ -1022,7 +1110,8 @@ static void handleData() {
         "\"speed\":%.2f,\"cadence\":%d,\"power\":%d,\"battery\":%d,"
         "\"bridge_battery\":%u,\"bridge_battery_mv\":%u,"
         "\"odometer\":%.2f,\"ambient\":%.1f,\"bike_light\":%d,"
-        "\"locked\":%s,\"charger\":%s,\"reserve\":%s,\"diag\":%s,\"standstill\":%s}",
+        "\"locked\":%s,\"charger\":%s,\"reserve\":%s,\"diag\":%s,\"standstill\":%s,"
+        "\"debug\":%s}",
         gSimEnabled     ? "true" : "false",
         (int)gMode,
         gBaseDeviceName,
@@ -1038,10 +1127,57 @@ static void handleData() {
         d.chargerConn  ? "true" : "false",
         d.lightReserve ? "true" : "false",
         d.diagActive   ? "true" : "false",
-        d.notDriving   ? "true" : "false"
+        d.notDriving   ? "true" : "false",
+        gBleDebug      ? "true" : "false"
     );
     webServer.sendHeader("Cache-Control", "no-store");
     webServer.send(200, "application/json", buf);
+}
+
+static void handleLog() {
+    // Return ring buffer contents as plain text, oldest entry first.
+    // Served at GET /log — readable from a browser or via WebFetch.
+    static char logBuf[DBLOG_ENTRIES * DBLOG_LINE + 64];
+    int pos = 0;
+    if (dblogCount == 0) {
+        pos = snprintf(logBuf, sizeof(logBuf), "(log empty)\n");
+    } else {
+        int start = (dblogHead - dblogCount + DBLOG_ENTRIES) % DBLOG_ENTRIES;
+        for (int i = 0; i < dblogCount && pos < (int)sizeof(logBuf) - 2; i++) {
+            int idx = (start + i) % DBLOG_ENTRIES;
+            pos += snprintf(logBuf + pos, sizeof(logBuf) - pos, "%s\n", dblogBuf[idx]);
+        }
+    }
+    webServer.sendHeader("Cache-Control", "no-store");
+    webServer.send(200, "text/plain", logBuf);
+}
+
+static void handleClearLog() {
+    dblogHead = dblogCount = 0;
+    dblogLastLdiMs = 0;
+    webServer.sendHeader("Cache-Control", "no-store");
+    webServer.send(200, "text/plain", "Log cleared");
+}
+
+static void handleSetDebug() {
+    if (!webServer.hasArg("debug")) {
+        webServer.send(400, "text/plain", "Missing debug parameter");
+        return;
+    }
+    int d = webServer.arg("debug").toInt();
+    if (d != 0 && d != 1) {
+        webServer.send(400, "text/plain", "debug must be 0 or 1");
+        return;
+    }
+    Preferences prefs;
+    prefs.begin("ebike", false);
+    prefs.putUChar("bdbg", (uint8_t)d);
+    prefs.end();
+    webServer.sendHeader("Cache-Control", "no-store");
+    webServer.send(200, "text/plain",
+        d ? "Debug enabled. Rebooting..." : "Debug disabled. Rebooting...");
+    delay(300);
+    ESP.restart();
 }
 
 static void startWebDebug() {
@@ -1056,7 +1192,10 @@ static void startWebDebug() {
     webServer.on("/status",  handleStatus);
     webServer.on("/setmode", handleSetMode);
     webServer.on("/setname", handleSetName);
-    webServer.on("/setsim",  handleSetSim);
+    webServer.on("/setsim",    handleSetSim);
+    webServer.on("/setdebug",  handleSetDebug);
+    webServer.on("/log",       handleLog);
+    webServer.on("/clearlog",  handleClearLog);
     webServer.on("/update",  HTTP_GET,  handleUpdatePage);
     webServer.on("/update",  HTTP_POST, handleUpdateDone, handleUpdateUpload);
     webServer.begin();
@@ -1103,7 +1242,8 @@ void setup() {
         uint8_t stored = prefs.getUChar("mode", (uint8_t)DEFAULT_MODE);
         if (stored >= 1 && stored <= 3) gMode = (FirmwareMode)stored;
         prefs.getString("dname", "BoschEBike").toCharArray(gBaseDeviceName, sizeof(gBaseDeviceName));
-        gSimEnabled = prefs.getUChar("sim", 0) != 0;
+        gSimEnabled = prefs.getUChar("sim",  0) != 0;
+        gBleDebug   = prefs.getUChar("bdbg", 0) != 0;
         prefs.end();
     }
     buildDeviceName();
