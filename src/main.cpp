@@ -428,6 +428,9 @@ static int gattWriteCccdCB(uint16_t, const struct ble_gatt_error* error,
         ebikeGattReady      = true;
         gattDiscoveryActive = false;
         nextGattRetryMs     = 0;
+        // Reset the CSC timestamp so the first real LDI packet does not
+        // accumulate distance for the entire GATT discovery gap (2–5 s).
+        cscLastUpdateMs = 0;
         if (!clientConnected) startAdvertisingForClient();
     } else {
         gattDiscoveryActive = false;
@@ -689,9 +692,11 @@ static void resetAndAdvertiseForEbike() {
     ebikeConnHandle     = BLE_HS_CONN_HANDLE_NONE;
     ldiSvcStart = ldiSvcEnd = ldiCharHandle = ldiCccdHandle = 0;
     flagEbikePeripheralConn = flagEbikeDisconn = false;
-    gData           = LiveData{};
-    nextGattRetryMs = 0;
-    // Reset CSC accumulators so speeds start cleanly on reconnect
+    gData               = LiveData{};
+    nextGattRetryMs     = 0;
+    nextNoEbikeNotifyMs = 0;  // send first no-ebike notification immediately
+    // Reset CSC fractional accumulators; totals are preserved so the client
+    // sees a smooth continuation (no backward jump) when the bike reconnects.
     cscWheelRevFrac = cscCrankRevFrac = 0.0f;
     cscLastUpdateMs = 0;
     startAdvertisingForEbike();
