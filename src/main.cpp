@@ -730,11 +730,16 @@ static void startAdvertisingForClient() {
         scan.setName(gDeviceName);
     } else {
         // AD type 0x03: Complete List of 16-bit Service UUIDs
-        uint16_t uuid16 = (gMode == MODE_POWER_SENSOR) ? 0x1818 : 0x1816;
+        // AD type 0x19: Appearance — required for fitness clients (Suunto, Garmin,
+        // Wahoo) to categorise the sensor and offer it in the correct activity.
+        //   0x0484 = Cycling: Power Sensor  (BT Assigned Numbers §2.6.3)
+        //   0x0483 = Cycling: Speed and Cadence Sensor
+        uint16_t uuid16     = (gMode == MODE_POWER_SENSOR) ? 0x1818 : 0x1816;
+        uint16_t appearance = (gMode == MODE_POWER_SENSOR) ? 0x0484 : 0x0483;
         const uint8_t payload[] = {
             0x02, 0x01, 0x06,
-            0x03, 0x03,
-            (uint8_t)(uuid16 & 0xFF), (uint8_t)(uuid16 >> 8)
+            0x03, 0x03, (uint8_t)(uuid16 & 0xFF),     (uint8_t)(uuid16 >> 8),
+            0x03, 0x19, (uint8_t)(appearance & 0xFF), (uint8_t)(appearance >> 8)
         };
         advData.addData(std::string((const char*)payload, sizeof(payload)));
         scan.setName(gDeviceName);
