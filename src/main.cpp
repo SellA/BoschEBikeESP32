@@ -55,9 +55,10 @@
 
 // ─── Firmware mode ────────────────────────────────────────────────────────────
 enum FirmwareMode : uint8_t {
-    MODE_SUUNTO_BRIDGE = 1,
-    MODE_POWER_SENSOR  = 2,
-    MODE_SPEED_CADENCE = 3
+    MODE_SUUNTO_BRIDGE  = 1,
+    MODE_POWER_SENSOR   = 2,
+    MODE_SPEED_CADENCE  = 3,
+    MODE_POWER_CADENCE  = 4   // CPS (0x1818) + CSC (0x1816) on the same device
 };
 
 // Default mode used when NVS has never been written (first flash).
@@ -70,12 +71,13 @@ static FirmwareMode gMode = DEFAULT_MODE;
 // gBaseDeviceName is stored in NVS (key "dname"); gDeviceName is composed at
 // boot and used everywhere (NimBLEDevice::init, advertising scan response).
 static char gBaseDeviceName[21] = "BoschEBike";  // max 20 chars + null
-static char gDeviceName[34]     = {};             // base + longest suffix " SpeedCadence"
+static char gDeviceName[34]     = {};             // base + longest suffix " PowerCadence"
 
 static void buildDeviceName() {
     const char* suffix =
-        gMode == MODE_SUUNTO_BRIDGE ? " Bridge"       :
-        gMode == MODE_POWER_SENSOR  ? " Power"        : " SpeedCadence";
+        gMode == MODE_SUUNTO_BRIDGE ? " Bridge"        :
+        gMode == MODE_POWER_SENSOR  ? " Power"         :
+        gMode == MODE_SPEED_CADENCE ? " SpeedCadence"  : " PowerCadence";
     snprintf(gDeviceName, sizeof(gDeviceName), "%s%s", gBaseDeviceName, suffix);
 }
 
@@ -293,6 +295,9 @@ static void updateBridgeBattery(bool force = false) {
 // Power data comes from the eBike, so this value is only stored and reported
 // back to the client — it has no effect on the power calculation.
 static uint16_t cpsCrankLengthTenthMm = 1725;
+// Wheel event timestamp for MODE_POWER_CADENCE CPS measurement.
+// CPS spec uses 1/2048 s resolution (different from CSC which uses 1/1024 s).
+static uint16_t cpsCombWheelEventT = 0;
 
 // ─── CSC accumulator state ────────────────────────────────────────────────────
 static float    cscWheelRevFrac    = 0.0f;
@@ -370,6 +375,62 @@ static void notifyCpsData() {
     pCpsChar->notify();
 }
 
+// MODE_POWER_CADENCE: CPS Measurement with power + wheel revolution + crank revolution
+// data packed into a single packet. This is the standard way real power meters (e.g.
+// Favero Assioma, Garmin Vector) expose all three metrics over a single CPS service.
+//
+// Flags: 0x0030 = Wheel Revolution Data Present (bit 4) + Crank Revolution Data Present (bit 5)
+// Packet layout (14 bytes):
+//   flags(2LE) | power(2LE) | cum_wheel(4LE) | wheel_time(2LE,1/2048s) |
+//   cum_crank(2LE) | crank_time(2LE,1/1024s)
+static void notifyCpsCombinedData() {
+    if (!clientConnected || !pCpsChar) return;
+
+    uint32_t now = millis();
+    uint32_t dt  = cscLastUpdateMs ? (now - cscLastUpdateMs) : 0;
+    cscLastUpdateMs = now;
+
+    if (dt > 0 && dt < 5000) {
+        float dtSec = dt / 1000.0f;
+        if (gData.speedKmh > 0.1f) {
+            float speedMs = gData.speedKmh / 3.6f;
+            cscWheelRevFrac += speedMs * dtSec / (WHEEL_CIRCUMFERENCE_MM / 1000.0f);
+            uint32_t newRevs = (uint32_t)cscWheelRevFrac;
+            if (newRevs > 0) {
+                cscWheelRevFrac  -= newRevs;
+                cscWheelRevTotal += newRevs;
+                cpsCombWheelEventT = (uint16_t)(((uint64_t)now * 2048) / 1000);
+            }
+        }
+        if (gData.cadenceRpm > 0) {
+            cscCrankRevFrac += gData.cadenceRpm / 60.0f * dtSec;
+            uint16_t newRevs = (uint16_t)cscCrankRevFrac;
+            if (newRevs > 0) {
+                cscCrankRevFrac   -= newRevs;
+                cscCrankRevTotal  += newRevs;
+                cscLastCrankEventT = (uint16_t)(((uint64_t)now * 1024) / 1000);
+            }
+        }
+    }
+
+    int16_t power = (int16_t)gData.powerW;
+    uint8_t buf[14];
+    buf[0]  = 0x30; buf[1] = 0x00;
+    buf[2]  = (uint8_t)(power);        buf[3]  = (uint8_t)(power >> 8);
+    buf[4]  = (uint8_t)(cscWheelRevTotal);
+    buf[5]  = (uint8_t)(cscWheelRevTotal >> 8);
+    buf[6]  = (uint8_t)(cscWheelRevTotal >> 16);
+    buf[7]  = (uint8_t)(cscWheelRevTotal >> 24);
+    buf[8]  = (uint8_t)(cpsCombWheelEventT);
+    buf[9]  = (uint8_t)(cpsCombWheelEventT >> 8);
+    buf[10] = (uint8_t)(cscCrankRevTotal);
+    buf[11] = (uint8_t)(cscCrankRevTotal >> 8);
+    buf[12] = (uint8_t)(cscLastCrankEventT);
+    buf[13] = (uint8_t)(cscLastCrankEventT >> 8);
+    pCpsChar->setValue(buf, 14);
+    pCpsChar->notify();
+}
+
 static void notifyCscData() {
     if (!clientConnected || !pCscChar) return;
 
@@ -434,7 +495,8 @@ static void handleLdiPayload(const uint8_t* data, size_t len) {
     }
     if      (gMode == MODE_SUUNTO_BRIDGE) notifyLdiData(data, len);
     else if (gMode == MODE_POWER_SENSOR)  notifyCpsData();
-    else                                  notifyCscData();
+    else if (gMode == MODE_SPEED_CADENCE) notifyCscData();
+    else                                  notifyCpsCombinedData();  // MODE_POWER_CADENCE
 }
 
 // ─── Simulation / no-ebike data ───────────────────────────────────────────────
@@ -457,8 +519,10 @@ static void generateAndNotifySimData() {
         notifyLdiData(buf, (size_t)(p - buf));
     } else if (gMode == MODE_POWER_SENSOR) {
         notifyCpsData();
-    } else {
+    } else if (gMode == MODE_SPEED_CADENCE) {
         notifyCscData();
+    } else {  // MODE_POWER_CADENCE
+        notifyCpsCombinedData();
     }
 }
 
@@ -476,8 +540,10 @@ static void notifyNoEbikeData() {
         notifyLdiData(buf, len);
     } else if (gMode == MODE_POWER_SENSOR) {
         notifyCpsData();   // sends 0 W
-    } else {
+    } else if (gMode == MODE_SPEED_CADENCE) {
         notifyCscData();   // sends unchanged cumulative counts (speed = 0)
+    } else {  // MODE_POWER_CADENCE
+        notifyCpsCombinedData();
     }
 }
 
@@ -742,8 +808,8 @@ static void startAdvertisingForClient() {
         // Wahoo) to categorise the sensor and offer it in the correct activity.
         //   0x0484 = Cycling: Power Sensor  (BT Assigned Numbers §2.6.3)
         //   0x0483 = Cycling: Speed and Cadence Sensor
-        uint16_t uuid16     = (gMode == MODE_POWER_SENSOR) ? 0x1818 : 0x1816;
-        uint16_t appearance = (gMode == MODE_POWER_SENSOR) ? 0x0484 : 0x0483;
+        uint16_t uuid16     = (gMode == MODE_SPEED_CADENCE) ? 0x1816 : 0x1818;
+        uint16_t appearance = (gMode == MODE_SPEED_CADENCE) ? 0x0483 : 0x0484;
         const uint8_t payload[] = {
             0x02, 0x01, 0x06,
             0x03, 0x03, (uint8_t)(uuid16 & 0xFF),     (uint8_t)(uuid16 >> 8),
@@ -813,6 +879,17 @@ class CpControlPointCB : public NimBLECharacteristicCallbacks {
         int     extraLen = 0;
 
         switch (opcode) {
+            case 0x01:  // Set Cumulative Wheel Revolutions (used in MODE_POWER_CADENCE)
+                if (val.size() >= 5) {
+                    uint32_t cumVal = (uint8_t)val[1] | ((uint8_t)val[2] << 8) |
+                                      ((uint8_t)val[3] << 16) | ((uint8_t)val[4] << 24);
+                    cscWheelRevTotal = cumVal;
+                    cscWheelRevFrac  = 0.0f;
+                    dblog("CPCP: set cumulative wheel=%lu", (unsigned long)cumVal);
+                } else {
+                    respCode = 0x03;  // Invalid Parameter
+                }
+                break;
             case 0x04:  // Set Crank Length (param: uint16_t, 1/10 mm)
                 if (val.size() >= 3) {
                     cpsCrankLengthTenthMm = (uint8_t)val[1] | ((uint8_t)val[2] << 8);
@@ -936,6 +1013,7 @@ h1{color:#58a6ff;font-size:18px;margin:0 0 4px}
     <button class="mbtn" id="mb1" onclick="setMode(1)">Suunto Bridge</button>
     <button class="mbtn" id="mb2" onclick="setMode(2)">Power Sensor</button>
     <button class="mbtn" id="mb3" onclick="setMode(3)">Speed &amp; Cadence</button>
+    <button class="mbtn" id="mb4" onclick="setMode(4)">Power + Cadence</button>
   </div>
   <div id="mst"></div>
 </div>
@@ -969,8 +1047,8 @@ h1{color:#58a6ff;font-size:18px;margin:0 0 4px}
 <div id="ts"></div>
 <script>
 const LT=['−','OFF','ON'];
-const MN=['','Suunto Bridge','Power Sensor','Speed & Cadence'];
-const MS=['',' Bridge',' Power',' SpeedCadence'];
+const MN=['','Suunto Bridge','Power Sensor','Speed & Cadence','Power + Cadence'];
+const MS=['',' Bridge',' Power',' SpeedCadence',' PowerCadence'];
 let busy=false;
 let nameFocused=false;
 document.getElementById('dname').addEventListener('focus',()=>{nameFocused=true;});
@@ -1037,7 +1115,7 @@ function pollData(){
     f('fl_dg',d.diag,'Diag');
     f('fl_st',d.standstill,'Stationary');
     f('fl_cl',d.client,'Client');
-    for(var i=1;i<=3;i++)document.getElementById('mb'+i).className='mbtn'+(d.mode==i?' act':'');
+    for(var i=1;i<=4;i++)document.getElementById('mb'+i).className='mbtn'+(d.mode==i?' act':'');
     document.getElementById('sb0').className='mbtn'+(d.sim?'':' act');
     document.getElementById('sb1').className='mbtn'+(d.sim?' act':'');
     document.getElementById('db0').className='mbtn'+(d.debug?'':' act');
@@ -1073,8 +1151,8 @@ static void handleSetMode() {
         return;
     }
     int m = webServer.arg("mode").toInt();
-    if (m < 1 || m > 3) {
-        webServer.send(400, "text/plain", "Invalid mode (1-3)");
+    if (m < 1 || m > 4) {
+        webServer.send(400, "text/plain", "Invalid mode (1-4)");
         return;
     }
     Preferences prefs;
@@ -1082,7 +1160,7 @@ static void handleSetMode() {
     prefs.putUChar("mode", (uint8_t)m);
     prefs.end();
 
-    const char* names[] = { "", "Suunto Bridge", "Power Sensor", "Speed & Cadence" };
+    const char* names[] = { "", "Suunto Bridge", "Power Sensor", "Speed & Cadence", "Power + Cadence" };
     char buf[64];
     snprintf(buf, sizeof(buf), "Mode set to %s. Rebooting...", names[m]);
     webServer.sendHeader("Cache-Control", "no-store");
@@ -1325,7 +1403,7 @@ void setup() {
         Preferences prefs;
         prefs.begin("ebike", true);
         uint8_t stored = prefs.getUChar("mode", (uint8_t)DEFAULT_MODE);
-        if (stored >= 1 && stored <= 3) gMode = (FirmwareMode)stored;
+        if (stored >= 1 && stored <= 4) gMode = (FirmwareMode)stored;
         prefs.getString("dname", "BoschEBike").toCharArray(gBaseDeviceName, sizeof(gBaseDeviceName));
         gSimEnabled = prefs.getUChar("sim",  0) != 0;
         gBleDebug   = prefs.getUChar("bdbg", 0) != 0;
@@ -1356,8 +1434,9 @@ void setup() {
     // Set GAP Appearance characteristic (0x2A01) so connected clients can read
     // the device type. Some fitness watches read this after connecting to decide
     // which activity sport this sensor belongs to.
-    if      (gMode == MODE_POWER_SENSOR)  ble_svc_gap_device_appearance_set(0x0484);
-    else if (gMode == MODE_SPEED_CADENCE) ble_svc_gap_device_appearance_set(0x0483);
+    if      (gMode == MODE_POWER_SENSOR  ||
+             gMode == MODE_POWER_CADENCE)  ble_svc_gap_device_appearance_set(0x0484);
+    else if (gMode == MODE_SPEED_CADENCE)  ble_svc_gap_device_appearance_set(0x0483);
     NimBLEDevice::setCustomGapHandler(customGapHandler);
 
     pServer = NimBLEDevice::createServer();
@@ -1393,7 +1472,7 @@ void setup() {
                                                 NIMBLE_PROPERTY::INDICATE);
         cpcp->setCallbacks(new CpControlPointCB());
         svc->start();
-    } else {
+    } else if (gMode == MODE_SPEED_CADENCE) {
         // Use explicit 16-bit UUIDs (see CPS comment above).
         auto* svc = pServer->createService(NimBLEUUID((uint16_t)0x1816));
         pCscChar  = svc->createCharacteristic(NimBLEUUID((uint16_t)0x2A5B),
@@ -1414,6 +1493,31 @@ void setup() {
                                                 NIMBLE_PROPERTY::WRITE |
                                                 NIMBLE_PROPERTY::INDICATE);
         sccp->setCallbacks(new ScControlPointCB());
+        svc->start();
+    } else {
+        // MODE_POWER_CADENCE: single CPS service with Wheel Revolution Data (bit 4)
+        // and Crank Revolution Data (bit 5) packed into the CPS Measurement packet.
+        // This is the standard approach of real power meters (Favero Assioma, Garmin
+        // Vector): one 0x1818 service carrying power + speed + cadence together, so
+        // fitness clients pair it as a power sensor and get all three metrics.
+        auto* svc = pServer->createService(NimBLEUUID((uint16_t)0x1818));
+        pCpsChar  = svc->createCharacteristic(NimBLEUUID((uint16_t)0x2A63),
+                                               NIMBLE_PROPERTY::NOTIFY |
+                                               NIMBLE_PROPERTY::READ);
+        auto* feat = svc->createCharacteristic(NimBLEUUID((uint16_t)0x2A65),
+                                                NIMBLE_PROPERTY::READ);
+        // Bits 4+5: Wheel/Crank Revolution Data Supported (enables extended packet)
+        // Bit 14:   Crank Length Adjustment Supported (prompts crank length at pairing)
+        uint32_t featVal = 0x00004030;
+        feat->setValue((uint8_t*)&featVal, 4);
+        auto* loc = svc->createCharacteristic(NimBLEUUID((uint16_t)0x2A5D),
+                                               NIMBLE_PROPERTY::READ);
+        uint8_t locVal = 0x00;
+        loc->setValue(&locVal, 1);
+        auto* cpcp = svc->createCharacteristic(NimBLEUUID((uint16_t)0x2A66),
+                                                NIMBLE_PROPERTY::WRITE |
+                                                NIMBLE_PROPERTY::INDICATE);
+        cpcp->setCallbacks(new CpControlPointCB());
         svc->start();
     }
 
