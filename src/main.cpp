@@ -49,6 +49,7 @@
 #include <Preferences.h>
 #include <NimBLEDevice.h>
 #include <stdarg.h>
+#include "nimble/nimble/host/services/gap/include/services/gap/ble_svc_gap.h"
 #include "nimble/nimble/host/include/host/ble_gatt.h"
 #include "nimble/nimble/host/include/host/ble_hs_mbuf.h"
 
@@ -1301,6 +1302,11 @@ void setup() {
         NimBLEDevice::setSecurityAuth(false, false, false);
     }
     NimBLEDevice::setPower(ESP_PWR_LVL_P9);
+    // Set GAP Appearance characteristic (0x2A01) so connected clients can read
+    // the device type. Some fitness watches read this after connecting to decide
+    // which activity sport this sensor belongs to.
+    if      (gMode == MODE_POWER_SENSOR)  ble_svc_gap_device_appearance_set(0x0484);
+    else if (gMode == MODE_SPEED_CADENCE) ble_svc_gap_device_appearance_set(0x0483);
     NimBLEDevice::setCustomGapHandler(customGapHandler);
 
     pServer = NimBLEDevice::createServer();
