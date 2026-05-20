@@ -383,6 +383,11 @@ static void notifyCpsData() {
 // Packet layout (14 bytes):
 //   flags(2LE) | power(2LE) | cum_wheel(4LE) | wheel_time(2LE,1/2048s) |
 //   cum_crank(2LE) | crank_time(2LE,1/1024s)
+//
+// CPS does not have a direct "cadence rpm" field. Clients derive cadence from
+// crank revolution deltas, so MODE_POWER_CADENCE encodes the Bosch rpm by
+// emitting one synthetic crank revolution per notification and setting the
+// event-time delta to exactly one revolution at the Bosch cadence.
 static void notifyCpsCombinedData() {
     if (!clientConnected || !pCpsChar) return;
 
@@ -404,17 +409,14 @@ static void notifyCpsCombinedData() {
                 cpsCombWheelEventT = (uint16_t)(((uint64_t)eventMs * 2048) / 1000);
             }
         }
-        if (gData.cadenceRpm > 0) {
-            float crankRevPerSec = gData.cadenceRpm / 60.0f;
-            cscCrankRevFrac += crankRevPerSec * dtSec;
-            uint16_t newRevs = (uint16_t)cscCrankRevFrac;
-            if (newRevs > 0) {
-                cscCrankRevFrac   -= newRevs;
-                cscCrankRevTotal  += newRevs;
-                uint32_t eventMs = now - (uint32_t)(cscCrankRevFrac / crankRevPerSec * 1000.0f);
-                cscLastCrankEventT = (uint16_t)(((uint64_t)eventMs * 1024) / 1000);
-            }
-        }
+    }
+
+    if (gData.cadenceRpm > 0) {
+        uint32_t crankPeriodTicks = (61440UL + ((uint32_t)gData.cadenceRpm / 2)) /
+                                    (uint32_t)gData.cadenceRpm;
+        if (crankPeriodTicks == 0) crankPeriodTicks = 1;
+        cscCrankRevTotal++;
+        cscLastCrankEventT = (uint16_t)(cscLastCrankEventT + (uint16_t)crankPeriodTicks);
     }
 
     int16_t power = (int16_t)gData.powerW;
