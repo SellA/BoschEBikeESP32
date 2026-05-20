@@ -509,8 +509,8 @@ static void handleLdiPayload(const uint8_t* data, size_t len) {
 static void generateAndNotifySimData() {
     uint32_t t = millis();
     gData.speedKmh   = triWave(t, 20000, 1500, 3500) / 100.0f;
-    gData.cadenceRpm = triWave(t, 15000,   70,   95);
-    gData.powerW     = triWave(t, 12000,  120,  280);
+    gData.cadenceRpm = triWave(t, 15000,    0,  120);
+    gData.powerW     = triWave(t, 12000,    0,  500);
     gData.batterySoc = 75;
     gData.odometerKm = 1234.0f;
     gData.valid      = true;
