@@ -1255,8 +1255,18 @@ void setup() {
     startWebDebug();
 
     NimBLEDevice::init(gDeviceName);
-    NimBLEDevice::setSecurityAuth(BLE_SM_PAIR_AUTHREQ_SC | BLE_SM_PAIR_AUTHREQ_BOND);
-    NimBLEDevice::setSecurityIOCap(BLE_HS_IO_NO_INPUT_OUTPUT);
+    // Bridge mode: Bosch bike requires SC + bonding → set globally.
+    // Power/CSC modes: standard fitness clients (Suunto, Garmin, Wahoo) expect an
+    // open connection with no security request. Setting BOND globally would cause
+    // NimBLE to send a Security Request PDU on every client connection, making the
+    // client disconnect before it can write the CCCD to enable notifications.
+    // The bike can still initiate its own encryption in all modes.
+    if (gMode == MODE_SUUNTO_BRIDGE) {
+        NimBLEDevice::setSecurityAuth(BLE_SM_PAIR_AUTHREQ_SC | BLE_SM_PAIR_AUTHREQ_BOND);
+        NimBLEDevice::setSecurityIOCap(BLE_HS_IO_NO_INPUT_OUTPUT);
+    } else {
+        NimBLEDevice::setSecurityAuth(false, false, false);
+    }
     NimBLEDevice::setPower(ESP_PWR_LVL_P9);
     NimBLEDevice::setCustomGapHandler(customGapHandler);
 
