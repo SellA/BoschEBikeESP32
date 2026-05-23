@@ -53,6 +53,8 @@
 #include "nimble/nimble/host/include/host/ble_gatt.h"
 #include "nimble/nimble/host/include/host/ble_hs_mbuf.h"
 
+#define FIRMWARE_VERSION "1.0.0"
+
 // ─── Firmware mode ────────────────────────────────────────────────────────────
 enum FirmwareMode : uint8_t {
     MODE_SUUNTO_BRIDGE  = 1,
@@ -965,176 +967,290 @@ static const uint32_t WEB_IDLE_AFTER_CLIENT_MS = 60000;
 
 static const char INDEX_HTML[] PROGMEM = R"html(<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
 <title>BoschEBike Bridge</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#x26A1;</text></svg>">
 <style>
-*{box-sizing:border-box}
-body{background:#0d1117;color:#e6edf3;font-family:monospace;padding:16px;margin:0}
-h1{color:#58a6ff;font-size:18px;margin:0 0 4px}
-#st{font-size:13px;margin-bottom:10px}
-.grid{display:grid;grid-template-columns:1fr 1fr;gap:8px;max-width:500px}
-.card{background:#161b22;border-radius:8px;padding:12px}
-.lbl{color:#8b949e;font-size:10px;letter-spacing:.5px;margin-bottom:2px}
-.val{font-size:28px;font-weight:bold}
-.unit{color:#8b949e;font-size:13px}
-.flags{background:#161b22;border-radius:8px;padding:10px;margin-top:8px;max-width:500px}
-.f{display:inline-block;margin:3px;padding:3px 10px;border-radius:4px;font-size:12px}
-.on{background:#1f6feb}.off{background:#21262d;color:#484f58}
-.msect{background:#161b22;border-radius:8px;padding:10px;margin-top:8px;max-width:500px}
-.mbtn{background:#21262d;color:#e6edf3;border:1px solid #30363d;border-radius:6px;
-  padding:6px 14px;cursor:pointer;font-family:monospace;font-size:12px;margin:3px}
-.mbtn.act{background:#1f6feb;border-color:#1f6feb}
-#mst{font-size:11px;color:#8b949e;margin-top:6px;min-height:16px}
-.dinput{display:flex;gap:6px;margin-top:6px;align-items:center}
-.dinput input{background:#0d1117;color:#e6edf3;border:1px solid #30363d;border-radius:6px;
-  padding:5px 10px;font-family:monospace;font-size:13px;flex:1;min-width:0}
-.dinput input:focus{outline:none;border-color:#58a6ff}
-.dinput button{background:#21262d;color:#e6edf3;border:1px solid #30363d;border-radius:6px;
-  padding:5px 12px;cursor:pointer;font-family:monospace;font-size:12px;white-space:nowrap}
-.dinput button:hover{background:#30363d}
-#dnprev{font-size:11px;color:#58a6ff;margin-top:4px;min-height:16px}
-#dnst{font-size:11px;color:#8b949e;margin-top:2px;min-height:16px}
-#ts{margin-top:10px;color:#484f58;font-size:11px}
+:root{--bg:#0d1117;--sf:#161b22;--sf2:#1c2128;--bd:#30363d;--tx:#e6edf3;--mu:#8b949e;--bl:#58a6ff;--gn:#3fb950;--ye:#d29922;--pu:#a371f7;--re:#f85149}
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--tx);font-family:system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;font-size:14px;line-height:1.5;padding:16px}
+.wrap{max-width:520px}
+/* header */
+.hdr{display:flex;align-items:flex-start;justify-content:space-between;gap:8px;margin-bottom:12px;flex-wrap:wrap}
+.hdr-l h1{font-size:18px;font-weight:600;color:var(--bl);line-height:1.2}
+.hdr-l .ver{font-size:11px;color:var(--mu);margin-top:1px}
+.hdr-r{display:flex;flex-direction:column;align-items:flex-end;gap:5px}
+/* status pill */
+.st-pill{display:flex;align-items:center;gap:6px;background:var(--sf);border:1px solid var(--bd);border-radius:20px;padding:4px 12px;font-size:12px;white-space:nowrap}
+.st-dot{width:8px;height:8px;border-radius:50%;background:var(--mu);flex-shrink:0;transition:background .3s}
+.st-dot.gn{background:var(--gn);box-shadow:0 0 6px var(--gn)}
+.st-dot.ye{background:var(--ye);box-shadow:0 0 6px var(--ye)}
+.st-dot.pu{background:var(--pu);box-shadow:0 0 6px var(--pu)}
+/* lang switcher */
+.lang-sw{display:flex;gap:2px;background:var(--sf);border:1px solid var(--bd);border-radius:6px;padding:2px}
+.lang-btn{background:transparent;border:none;border-radius:4px;color:var(--mu);cursor:pointer;font:11px/1 system-ui,-apple-system,sans-serif;padding:3px 7px;transition:background .15s,color .15s}
+.lang-btn:hover:not(.act){background:var(--bd);color:var(--tx)}
+.lang-btn.act{background:var(--bl);color:#fff}
+/* sections */
+.sec{background:var(--sf);border:1px solid var(--bd);border-radius:10px;padding:14px;margin-bottom:10px}
+.sec-t{font-size:10px;font-weight:600;letter-spacing:.8px;text-transform:uppercase;color:var(--mu);margin-bottom:10px}
+/* sensor grid */
+.sgrid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.s-lbl{font-size:10px;font-weight:600;letter-spacing:.5px;text-transform:uppercase;color:var(--mu);margin-bottom:2px}
+.s-val{font-family:ui-monospace,'Cascadia Code',Consolas,monospace;font-size:26px;font-weight:700;line-height:1;color:var(--tx)}
+.s-unit{font-size:12px;color:var(--mu);margin-left:2px}
+hr.div{border:none;border-top:1px solid var(--bd);margin:10px 0}
+/* flags */
+.flags{display:flex;flex-wrap:wrap;gap:5px}
+.fl{display:inline-flex;align-items:center;padding:3px 10px;border-radius:20px;font-size:12px;border:1px solid transparent;transition:background .2s,color .2s}
+.fl.on{background:#1f6feb33;border-color:var(--bl);color:var(--bl)}
+.fl.ye{background:#d2992233;border-color:var(--ye);color:var(--ye)}
+.fl.off{background:transparent;border-color:var(--bd);color:var(--mu)}
+/* mode buttons */
+.mbtns{display:flex;flex-wrap:wrap;gap:6px}
+.mbtn{background:var(--sf2);color:var(--tx);border:1px solid var(--bd);border-radius:6px;padding:7px 14px;cursor:pointer;font:13px/1 system-ui,-apple-system,sans-serif;transition:background .15s,border-color .15s}
+.mbtn:hover{background:var(--bd)}
+.mbtn.act{background:#1f6feb33;border-color:var(--bl);color:var(--bl)}
+.m-desc{font-size:11px;color:var(--mu);margin-top:7px;min-height:14px}
+/* inputs */
+.irow{display:flex;gap:6px}
+.irow input{flex:1;background:var(--bg);color:var(--tx);border:1px solid var(--bd);border-radius:6px;padding:7px 10px;font:13px/1 system-ui,-apple-system,sans-serif;min-width:0}
+.irow input:focus{outline:none;border-color:var(--bl)}
+/* buttons */
+.btn{background:var(--sf2);color:var(--tx);border:1px solid var(--bd);border-radius:6px;padding:7px 14px;cursor:pointer;font:12px/1 system-ui,-apple-system,sans-serif;white-space:nowrap;text-decoration:none;display:inline-block}
+.btn:hover{background:var(--bd)}
+/* toggle pair */
+.tpair{display:flex;gap:6px}
+.tbtn{flex:1;background:var(--sf2);color:var(--mu);border:1px solid var(--bd);border-radius:6px;padding:7px;cursor:pointer;font:12px/1 system-ui,-apple-system,sans-serif;text-align:center;transition:background .15s,color .15s}
+.tbtn:hover:not(.act){background:var(--bd);color:var(--tx)}
+.tbtn.act{background:#1f6feb33;border-color:var(--bl);color:var(--bl)}
+/* status/feedback lines */
+.sl{font-size:11px;color:var(--mu);margin-top:6px;min-height:16px}
+.nm-prev{font-size:11px;color:var(--bl);margin-top:4px;min-height:16px}
+/* footer */
+.ftr{margin-top:14px;display:flex;justify-content:space-between;align-items:center}
+.ftr a{color:var(--bl);text-decoration:none;font-size:12px}
+.ftr a:hover{text-decoration:underline}
+#ts{font-size:11px;color:var(--bd)}
+/* error banner */
+#errB{display:none;background:#f8514933;border:1px solid var(--re);border-radius:8px;padding:8px 12px;color:var(--re);font-size:12px;margin-bottom:10px}
 </style></head><body>
-<h1>BoschEBike Bridge</h1>
-<div id="st" style="color:#3fb950">Connecting...</div>
-<div class="grid">
-  <div class="card"><div class="lbl">SPEED</div><span class="val" id="spd">-</span> <span class="unit">km/h</span></div>
-  <div class="card"><div class="lbl">CADENCE</div><span class="val" id="cad">-</span> <span class="unit">rpm</span></div>
-  <div class="card"><div class="lbl">POWER</div><span class="val" id="pwr" style="color:#3fb950">-</span> <span class="unit">W</span></div>
-  <div class="card"><div class="lbl">BATTERY</div><span class="val" id="bat" style="color:#58a6ff">-</span> <span class="unit">%</span></div>
-  <div class="card"><div class="lbl">BRIDGE BATTERY</div><span class="val" id="bbat" style="color:#d29922">-</span> <span class="unit">%</span></div>
-  <div class="card"><div class="lbl">ODOMETER</div><span class="val" id="odo">-</span> <span class="unit">km</span></div>
-  <div class="card"><div class="lbl">AMBIENT LIGHT</div><span class="val" id="lux" style="color:#d29922">-</span> <span class="unit">lux</span></div>
+<div class="wrap">
+<div id="errB"></div>
+<div class="hdr">
+  <div class="hdr-l">
+    <h1>BoschEBike Bridge</h1>
+    <div class="ver" id="verLine">&#x2014;</div>
+  </div>
+  <div class="hdr-r">
+    <div class="st-pill"><div class="st-dot" id="stDot"></div><span id="stTxt">&#x2014;</span></div>
+    <div class="lang-sw">
+      <button class="lang-btn" data-lang="en" onclick="setLang('en')">EN</button>
+      <button class="lang-btn" data-lang="it" onclick="setLang('it')">IT</button>
+      <button class="lang-btn" data-lang="de" onclick="setLang('de')">DE</button>
+      <button class="lang-btn" data-lang="fr" onclick="setLang('fr')">FR</button>
+      <button class="lang-btn" data-lang="es" onclick="setLang('es')">ES</button>
+    </div>
+  </div>
 </div>
-<div class="flags">
-  <span class="f off" id="fl_lt">Light: -</span>
-  <span class="f off" id="fl_lk">Lock</span>
-  <span class="f off" id="fl_ch">Charger</span>
-  <span class="f off" id="fl_rv">Reserve</span>
-  <span class="f off" id="fl_dg">Diag</span>
-  <span class="f off" id="fl_st">Stationary</span>
-  <span class="f off" id="fl_cl">Client</span>
+<div class="sec">
+  <div class="sec-t" data-i18n="liveData">Live Data</div>
+  <div class="sgrid">
+    <div><div class="s-lbl" data-i18n="speed">Speed</div><span class="s-val" id="spd">&#x2014;</span><span class="s-unit">km/h</span></div>
+    <div><div class="s-lbl" data-i18n="cadence">Cadence</div><span class="s-val" id="cad">&#x2014;</span><span class="s-unit">rpm</span></div>
+    <div><div class="s-lbl" data-i18n="power">Power</div><span class="s-val" id="pwr" style="color:var(--gn)">&#x2014;</span><span class="s-unit">W</span></div>
+    <div><div class="s-lbl" data-i18n="bikeBat">Bike Battery</div><span class="s-val" id="bat" style="color:var(--bl)">&#x2014;</span><span class="s-unit">%</span></div>
+    <div><div class="s-lbl" data-i18n="bridgeBat">Bridge Battery</div><span class="s-val" id="bbat" style="color:var(--ye)">&#x2014;</span><span class="s-unit">%</span></div>
+    <div><div class="s-lbl" data-i18n="odometer">Odometer</div><span class="s-val" id="odo">&#x2014;</span><span class="s-unit">km</span></div>
+    <div><div class="s-lbl" data-i18n="ambient">Ambient Light</div><span class="s-val" id="lux" style="color:var(--ye)">&#x2014;</span><span class="s-unit">lux</span></div>
+  </div>
+  <hr class="div">
+  <div class="flags">
+    <span class="fl off" id="fl_lt">&#x2014;</span>
+    <span class="fl off" id="fl_lk">&#x2014;</span>
+    <span class="fl off" id="fl_ch">&#x2014;</span>
+    <span class="fl off" id="fl_rv">&#x2014;</span>
+    <span class="fl off" id="fl_dg">&#x2014;</span>
+    <span class="fl off" id="fl_st">&#x2014;</span>
+    <span class="fl off" id="fl_cl">&#x2014;</span>
+  </div>
 </div>
-<div class="msect">
-  <div class="lbl">FIRMWARE MODE</div>
-  <div style="margin-top:6px">
+<div class="sec">
+  <div class="sec-t" data-i18n="fwMode">Firmware Mode</div>
+  <div class="mbtns">
     <button class="mbtn" id="mb1" onclick="setMode(1)">Suunto Bridge</button>
     <button class="mbtn" id="mb2" onclick="setMode(2)">Power Sensor</button>
     <button class="mbtn" id="mb3" onclick="setMode(3)">Speed &amp; Cadence</button>
     <button class="mbtn" id="mb4" onclick="setMode(4)">Power + Cadence</button>
   </div>
-  <div id="mst"></div>
+  <div class="m-desc" id="mDesc"></div>
+  <div class="sl" id="mst"></div>
 </div>
-<div class="msect">
-  <div class="lbl">DEVICE SETTINGS</div>
-  <div class="dinput">
+<div class="sec">
+  <div class="sec-t" data-i18n="devName">Device Name</div>
+  <div class="irow">
     <input type="text" id="dname" maxlength="20" placeholder="BoschEBike" autocomplete="off" spellcheck="false">
-    <button onclick="saveName()">Save &amp; Reboot</button>
+    <button class="btn" onclick="saveName()" id="saveBtn">Save</button>
   </div>
-  <div id="dnprev"></div>
-  <div id="dnst"></div>
+  <div class="nm-prev" id="dnprev"></div>
+  <div class="sl" id="dnst"></div>
 </div>
-<div class="msect">
-  <div class="lbl">SIMULATION</div>
-  <div style="margin-top:6px">
-    <button class="mbtn" id="sb0" onclick="setSim(0)">Real eBike</button>
-    <button class="mbtn" id="sb1" onclick="setSim(1)">Simulated</button>
+<div class="sec">
+  <div class="sec-t" data-i18n="dataSrc">Data Source</div>
+  <div class="tpair">
+    <button class="tbtn" id="sb0" onclick="setSim(0)" data-i18n="realEbike">Real eBike</button>
+    <button class="tbtn" id="sb1" onclick="setSim(1)" data-i18n="simulation">Simulation</button>
   </div>
-  <div id="sst" style="font-size:11px;color:#8b949e;margin-top:6px;min-height:16px"></div>
+  <div class="sl" id="sst"></div>
 </div>
-<div class="msect">
-  <div class="lbl">BLE DEBUG LOG</div>
-  <div style="margin-top:6px;display:flex;align-items:center;flex-wrap:wrap;gap:4px">
-    <button class="mbtn" id="db0" onclick="setDebug(0)">Disabled</button>
-    <button class="mbtn" id="db1" onclick="setDebug(1)">Enabled</button>
-    <a href="/log" target="_blank" style="color:#58a6ff;font-size:12px;margin-left:6px;text-decoration:none">View log &#x2197;</a>
-    <button class="mbtn" onclick="clearLog()">Clear</button>
+<div class="sec">
+  <div class="sec-t" data-i18n="bleDebug">BLE Debug Log</div>
+  <div class="tpair" style="margin-bottom:8px">
+    <button class="tbtn" id="db0" onclick="setDebug(0)" data-i18n="disabled">Disabled</button>
+    <button class="tbtn" id="db1" onclick="setDebug(1)" data-i18n="enabled">Enabled</button>
   </div>
-  <div id="dbst" style="font-size:11px;color:#8b949e;margin-top:6px;min-height:16px"></div>
+  <div style="display:flex;gap:8px">
+    <a href="/log" target="_blank" class="btn" id="viewLogBtn">View log &#x2197;</a>
+    <button class="btn" onclick="clearLog()" id="clearBtn">Clear</button>
+  </div>
+  <div class="sl" id="dbst"></div>
 </div>
-<div id="ts"></div>
+<div class="ftr"><span id="ts"></span><a href="/update" id="otaLink">Firmware update &#x2197;</a></div>
+</div>
 <script>
-const LT=['−','OFF','ON'];
+const T={
+en:{liveData:'Live Data',speed:'Speed',cadence:'Cadence',power:'Power',bikeBat:'Bike Battery',bridgeBat:'Bridge Battery',odometer:'Odometer',ambient:'Ambient Light',fwMode:'Firmware Mode',devName:'Device Name',saveBtn:'Save',dataSrc:'Data Source',realEbike:'Real eBike',simulation:'Simulation',bleDebug:'BLE Debug Log',disabled:'Disabled',enabled:'Enabled',viewLog:'View log ↗',clearBtn:'Clear',otaLink:'Firmware update ↗',loading:'—',connecting:'Connecting…',waitBike:'Waiting for eBike…',gattInit:'eBike connected · Initializing…',readyWait:'Ready · Waiting for client',readyConn:'Ready · Client connected',simWait:'Simulation · Waiting for client',simConn:'Simulation · Client connected',connLost:'Connection lost',connRetry:'Connection lost — retrying…',saving:'Saving…',errConn:'Error — check connection',nameEmpty:'Name cannot be empty',bleName:'BLE name: ',updated:'Updated ',mDesc:['','Transparent LDI proxy for Suunto watch app','Standard Cycling Power Service (CPS/BLE)','Standard Speed & Cadence Service (CSC/BLE)','Power (CPS) and Speed & Cadence (CSC) combined'],lightOff:'Light: OFF',lightOn:'Light: ON',lightDash:'Light: —',flagLocked:'Locked',flagCharger:'Charger',flagReserve:'Reserve',flagDiag:'Diag',flagStat:'Stationary',flagClient:'Client connected',confirmMode:(n)=>`Switch to ${n} mode?\n\nThe bridge will reboot to apply the change.`,confirmName:(n)=>`Rename device to "${n}"?\n\nThe bridge will reboot to apply the change.`,confirmSimOn:'Switch to simulation mode?\n\nThe bridge will use simulated data instead of the real eBike. It will reboot to apply.',confirmSimOff:'Switch to real eBike mode?\n\nThe bridge will use live data from the bike. It will reboot to apply.'},
+it:{liveData:'Dati in tempo reale',speed:'Velocità',cadence:'Cadenza',power:'Potenza',bikeBat:'Batteria bici',bridgeBat:'Batteria bridge',odometer:'Contachilometri',ambient:'Luce ambiente',fwMode:'Modalità firmware',devName:'Nome dispositivo',saveBtn:'Salva',dataSrc:'Sorgente dati',realEbike:'eBike reale',simulation:'Simulazione',bleDebug:'Log debug BLE',disabled:'Disattivato',enabled:'Attivato',viewLog:'Visualizza log ↗',clearBtn:'Cancella',otaLink:'Aggiornamento firmware ↗',loading:'—',connecting:'Connessione…',waitBike:'In attesa di eBike…',gattInit:'eBike connessa · Inizializzazione…',readyWait:'Pronta · In attesa del client',readyConn:'Pronta · Client connesso',simWait:'Simulazione · In attesa del client',simConn:'Simulazione · Client connesso',connLost:'Connessione persa',connRetry:'Connessione persa — nuovo tentativo…',saving:'Salvataggio…',errConn:'Errore — verifica la connessione',nameEmpty:'Il nome non può essere vuoto',bleName:'Nome BLE: ',updated:'Aggiornato alle ',mDesc:['','Proxy LDI trasparente per app Suunto','Servizio standard Cycling Power (CPS/BLE)','Servizio standard Speed & Cadence (CSC/BLE)','Power (CPS) e Speed & Cadence (CSC) combinati'],lightOff:'Luce: OFF',lightOn:'Luce: ON',lightDash:'Luce: —',flagLocked:'Bloccato',flagCharger:'Caricatore',flagReserve:'Riserva',flagDiag:'Diagnosi',flagStat:'Fermo',flagClient:'Client connesso',confirmMode:(n)=>`Passare alla modalità ${n}?\n\nIl bridge si riavvierà per applicare la modifica.`,confirmName:(n)=>`Rinominare il dispositivo in "${n}"?\n\nIl bridge si riavvierà per applicare la modifica.`,confirmSimOn:'Attivare la simulazione?\n\nIl bridge userà dati simulati. Si riavvierà per applicare.',confirmSimOff:'Tornare alla modalità eBike reale?\n\nIl bridge userà i dati live dalla bici. Si riavvierà per applicare.'},
+de:{liveData:'Live-Daten',speed:'Geschwindigkeit',cadence:'Trittfrequenz',power:'Leistung',bikeBat:'Akku Fahrrad',bridgeBat:'Akku Bridge',odometer:'Kilometerstand',ambient:'Umgebungslicht',fwMode:'Firmware-Modus',devName:'Gerätename',saveBtn:'Speichern',dataSrc:'Datenquelle',realEbike:'Echtes eBike',simulation:'Simulation',bleDebug:'BLE-Debug-Log',disabled:'Deaktiviert',enabled:'Aktiviert',viewLog:'Log anzeigen ↗',clearBtn:'Löschen',otaLink:'Firmware-Update ↗',loading:'—',connecting:'Verbinden…',waitBike:'Warte auf eBike…',gattInit:'eBike verbunden · Initialisierung…',readyWait:'Bereit · Warte auf Client',readyConn:'Bereit · Client verbunden',simWait:'Simulation · Warte auf Client',simConn:'Simulation · Client verbunden',connLost:'Verbindung verloren',connRetry:'Verbindung verloren — erneuter Versuch…',saving:'Speichern…',errConn:'Fehler — Verbindung prüfen',nameEmpty:'Name darf nicht leer sein',bleName:'BLE-Name: ',updated:'Aktualisiert ',mDesc:['','Transparenter LDI-Proxy für Suunto-App','Standard Cycling Power Service (CPS/BLE)','Standard Speed & Cadence Service (CSC/BLE)','Power (CPS) und Speed & Cadence (CSC) kombiniert'],lightOff:'Licht: AUS',lightOn:'Licht: EIN',lightDash:'Licht: —',flagLocked:'Gesperrt',flagCharger:'Ladegerät',flagReserve:'Reserve',flagDiag:'Diagnose',flagStat:'Stillstand',flagClient:'Client verbunden',confirmMode:(n)=>`Zu Modus ${n} wechseln?\n\nDie Bridge wird neu gestartet, um die Änderung anzuwenden.`,confirmName:(n)=>`Gerät in "${n}" umbenennen?\n\nDie Bridge wird neu gestartet, um die Änderung anzuwenden.`,confirmSimOn:'Simulationsmodus aktivieren?\n\nDie Bridge verwendet simulierte Daten. Sie startet neu, um die Änderung anzuwenden.',confirmSimOff:'Zurück zum echten eBike-Modus?\n\nDie Bridge verwendet Live-Daten vom Fahrrad. Sie startet neu.'},
+fr:{liveData:'Données en direct',speed:'Vitesse',cadence:'Cadence',power:'Puissance',bikeBat:'Batterie vélo',bridgeBat:'Batterie bridge',odometer:'Compteur km',ambient:'Lumière ambiante',fwMode:'Mode firmware',devName:'Nom du dispositif',saveBtn:'Enregistrer',dataSrc:'Source de données',realEbike:'eBike réel',simulation:'Simulation',bleDebug:'Journal debug BLE',disabled:'Désactivé',enabled:'Activé',viewLog:'Voir le journal ↗',clearBtn:'Effacer',otaLink:'Mise à jour firmware ↗',loading:'—',connecting:'Connexion…',waitBike:'En attente de l’eBike…',gattInit:'eBike connecté · Initialisation…',readyWait:'Prêt · En attente du client',readyConn:'Prêt · Client connecté',simWait:'Simulation · En attente du client',simConn:'Simulation · Client connecté',connLost:'Connexion perdue',connRetry:'Connexion perdue — nouvelle tentative…',saving:'Enregistrement…',errConn:'Erreur — vérifier la connexion',nameEmpty:'Le nom ne peut pas être vide',bleName:'Nom BLE : ',updated:'Mis à jour à ',mDesc:['','Proxy LDI transparent pour app Suunto','Service standard Cycling Power (CPS/BLE)','Service standard Speed & Cadence (CSC/BLE)','Power (CPS) et Speed & Cadence (CSC) combinés'],lightOff:'Lumière : OFF',lightOn:'Lumière : ON',lightDash:'Lumière : —',flagLocked:'Verrouillé',flagCharger:'Chargeur',flagReserve:'Réserve',flagDiag:'Diagnostic',flagStat:'À l’arrêt',flagClient:'Client connecté',confirmMode:(n)=>`Passer en mode ${n} ?\n\nLe bridge va redémarrer pour appliquer le changement.`,confirmName:(n)=>`Renommer le dispositif en « ${n} » ?\n\nLe bridge va redémarrer pour appliquer le changement.`,confirmSimOn:'Activer la simulation ?\n\nLe bridge utilisera des données simulées. Il redémarrera pour appliquer.',confirmSimOff:'Revenir au mode eBike réel ?\n\nLe bridge utilisera les données en direct. Il redémarrera pour appliquer.'},
+es:{liveData:'Datos en vivo',speed:'Velocidad',cadence:'Cadencia',power:'Potencia',bikeBat:'Batería bici',bridgeBat:'Batería bridge',odometer:'Odómetro',ambient:'Luz ambiental',fwMode:'Modo de firmware',devName:'Nombre del dispositivo',saveBtn:'Guardar',dataSrc:'Fuente de datos',realEbike:'eBike real',simulation:'Simulación',bleDebug:'Log de debug BLE',disabled:'Desactivado',enabled:'Activado',viewLog:'Ver log ↗',clearBtn:'Limpiar',otaLink:'Actualizar firmware ↗',loading:'—',connecting:'Conectando…',waitBike:'Esperando eBike…',gattInit:'eBike conectada · Inicializando…',readyWait:'Lista · Esperando cliente',readyConn:'Lista · Cliente conectado',simWait:'Simulación · Esperando cliente',simConn:'Simulación · Cliente conectado',connLost:'Conexión perdida',connRetry:'Conexión perdida — reintentando…',saving:'Guardando…',errConn:'Error — verifica la conexión',nameEmpty:'El nombre no puede estar vacío',bleName:'Nombre BLE: ',updated:'Actualizado a las ',mDesc:['','Proxy LDI transparente para app Suunto','Servicio estándar Cycling Power (CPS/BLE)','Servicio estándar Speed & Cadence (CSC/BLE)','Power (CPS) y Speed & Cadence (CSC) combinados'],lightOff:'Luz: OFF',lightOn:'Luz: ON',lightDash:'Luz: —',flagLocked:'Bloqueado',flagCharger:'Cargador',flagReserve:'Reserva',flagDiag:'Diagnóstico',flagStat:'Parado',flagClient:'Cliente conectado',confirmMode:(n)=>`¿Cambiar al modo ${n}?\n\nEl bridge se reiniciará para aplicar el cambio.`,confirmName:(n)=>`¿Renombrar el dispositivo a "${n}"?\n\nEl bridge se reiniciará para aplicar el cambio.`,confirmSimOn:'¿Activar la simulación?\n\nEl bridge usará datos simulados. Se reiniciará para aplicar.',confirmSimOff:'¿Volver al modo eBike real?\n\nEl bridge usará datos en vivo de la bici. Se reiniciará para aplicar.'}
+};
 const MN=['','Suunto Bridge','Power Sensor','Speed & Cadence','Power + Cadence'];
 const MS=['',' Bridge',' Power',' SpeedCadence',' PowerCadence'];
-let busy=false;
-let nameFocused=false;
-document.getElementById('dname').addEventListener('focus',()=>{nameFocused=true;});
-document.getElementById('dname').addEventListener('blur',()=>{nameFocused=false;});
-document.getElementById('dname').addEventListener('input',function(){
-  var sfx=MS[currentMode]||'';
-  document.getElementById('dnprev').textContent=this.value?'BLE name: '+this.value+sfx:'';
+let busy=false,errCnt=0,curMode=1,nameFoc=false;
+let L=localStorage.getItem('lang')||'en';
+if(!T[L])L='en';
+
+function t(k){return T[L][k]||k;}
+
+function setLang(l){
+  L=l;localStorage.setItem('lang',l);
+  document.querySelectorAll('[data-i18n]').forEach(el=>{
+    const k=el.dataset.i18n;
+    if(T[L][k]!==undefined)el.textContent=T[L][k];
+  });
+  document.getElementById('saveBtn').textContent=t('saveBtn');
+  document.getElementById('viewLogBtn').textContent=t('viewLog');
+  document.getElementById('clearBtn').textContent=t('clearBtn');
+  document.getElementById('otaLink').textContent=t('otaLink');
+  document.querySelectorAll('.lang-btn').forEach(b=>b.classList.toggle('act',b.dataset.lang===l));
+  updateFlags(lastD);
+  if(lastD)document.getElementById('mDesc').textContent=t('mDesc')[lastD.mode]||'';
+}
+
+const dnEl=document.getElementById('dname');
+dnEl.addEventListener('focus',()=>{nameFoc=true;});
+dnEl.addEventListener('blur',()=>{nameFoc=false;});
+dnEl.addEventListener('input',function(){
+  const sfx=MS[curMode]||'';
+  document.getElementById('dnprev').textContent=this.value?t('bleName')+this.value+sfx:'';
 });
-var currentMode=1;
-function f(id,on,txt){var e=document.getElementById(id);e.textContent=txt;e.className='f '+(on?'on':'off');}
+
+function setDot(cls,txt){
+  const d=document.getElementById('stDot');
+  d.className='st-dot'+(cls?' '+cls:'');
+  document.getElementById('stTxt').textContent=txt;
+}
+
+function flagEl(id,state,txt){
+  const e=document.getElementById(id);
+  e.textContent=txt;
+  e.className='fl '+(state==='ye'?'ye':state?'on':'off');
+}
+
+let lastD=null;
+function updateFlags(d){
+  if(!d)return;
+  flagEl('fl_lt',d.bike_light===2?true:(d.bike_light===1?'ye':false),d.bike_light===2?t('lightOn'):(d.bike_light===1?t('lightOff'):t('lightDash')));
+  flagEl('fl_lk',d.locked,t('flagLocked'));
+  flagEl('fl_ch',d.charger,t('flagCharger'));
+  flagEl('fl_rv',d.reserve,t('flagReserve'));
+  flagEl('fl_dg',d.diag,t('flagDiag'));
+  flagEl('fl_st',d.standstill,t('flagStat'));
+  flagEl('fl_cl',d.client,t('flagClient'));
+}
+
+function api(url,stId){
+  document.getElementById(stId).textContent=t('saving');
+  fetch(url,{cache:'no-store'})
+    .then(r=>r.text()).then(tx=>{document.getElementById(stId).textContent=tx;})
+    .catch(()=>{document.getElementById(stId).textContent=t('errConn');});
+}
+
 function setMode(m){
-  document.getElementById('mst').textContent='Saving...';
-  fetch('/setmode?mode='+m,{cache:'no-store'})
-    .then(r=>r.text()).then(t=>{document.getElementById('mst').textContent=t;})
-    .catch(()=>{document.getElementById('mst').textContent='Error';});
+  if(!confirm(t('confirmMode')(MN[m])))return;
+  api('/setmode?mode='+m,'mst');
 }
+
 function saveName(){
-  var n=document.getElementById('dname').value.trim();
-  if(!n){document.getElementById('dnst').textContent='Name cannot be empty';return;}
-  document.getElementById('dnst').textContent='Saving...';
-  fetch('/setname?name='+encodeURIComponent(n),{cache:'no-store'})
-    .then(r=>r.text()).then(t=>{document.getElementById('dnst').textContent=t;})
-    .catch(()=>{document.getElementById('dnst').textContent='Error';});
+  const n=dnEl.value.trim();
+  if(!n){document.getElementById('dnst').textContent=t('nameEmpty');return;}
+  const full=n+(MS[curMode]||'');
+  if(!confirm(t('confirmName')(full)))return;
+  api('/setname?name='+encodeURIComponent(n),'dnst');
 }
+
 function setSim(s){
-  document.getElementById('sst').textContent='Saving...';
-  fetch('/setsim?sim='+s,{cache:'no-store'})
-    .then(r=>r.text()).then(t=>{document.getElementById('sst').textContent=t;})
-    .catch(()=>{document.getElementById('sst').textContent='Error';});
+  if(!confirm(s?t('confirmSimOn'):t('confirmSimOff')))return;
+  api('/setsim?sim='+s,'sst');
 }
-function setDebug(d){
-  document.getElementById('dbst').textContent='Saving...';
-  fetch('/setdebug?debug='+d,{cache:'no-store'})
-    .then(r=>r.text()).then(t=>{document.getElementById('dbst').textContent=t;})
-    .catch(()=>{document.getElementById('dbst').textContent='Error';});
-}
+
+function setDebug(d){api('/setdebug?debug='+d,'dbst');}
+
 function clearLog(){
   fetch('/clearlog',{cache:'no-store'})
-    .then(r=>r.text()).then(t=>{document.getElementById('dbst').textContent=t;})
-    .catch(()=>{document.getElementById('dbst').textContent='Error';});
+    .then(r=>r.text()).then(tx=>{document.getElementById('dbst').textContent=tx;})
+    .catch(()=>{document.getElementById('dbst').textContent=t('errConn');});
 }
+
 function pollData(){
   if(busy)return;busy=true;
   fetch('/data',{cache:'no-store'}).then(r=>r.json()).then(d=>{
-    currentMode=d.mode;
-    var s=document.getElementById('st');
-    var mn='['+MN[d.mode]+']';
-    if(d.sim){s.style.color='#a371f7';s.textContent='SIMULATION '+mn+' | Client: '+(d.client?'connected':'advertising');}
-    else if(!d.ebike){s.style.color='#d29922';s.textContent=mn+' waiting for bike...';}
-    else if(!d.gatt){s.style.color='#d29922';s.textContent=mn+' Bike connected | GATT: discovering...';}
-    else{s.style.color='#3fb950';s.textContent=mn+' Bike ready | Client: '+(d.client?'connected':'advertising');}
-    var v=d.valid;
-    document.getElementById('spd').textContent=v?d.speed.toFixed(1):'-';
-    document.getElementById('cad').textContent=v?d.cadence:'-';
-    document.getElementById('pwr').textContent=v?d.power:'-';
-    document.getElementById('bat').textContent=v?d.battery:'-';
+    lastD=d;errCnt=0;
+    document.getElementById('errB').style.display='none';
+    curMode=d.mode;
+    if(d.sim)setDot('pu',d.client?t('simConn'):t('simWait'));
+    else if(!d.ebike)setDot('ye',t('waitBike'));
+    else if(!d.gatt)setDot('ye',t('gattInit'));
+    else setDot('gn',d.client?t('readyConn'):t('readyWait'));
+    const v=d.valid;
+    document.getElementById('spd').textContent=v?d.speed.toFixed(1):'—';
+    document.getElementById('cad').textContent=v?d.cadence:'—';
+    document.getElementById('pwr').textContent=v?d.power:'—';
+    document.getElementById('bat').textContent=v?d.battery:'—';
     document.getElementById('bbat').textContent=d.bridge_battery;
-    document.getElementById('odo').textContent=v?d.odometer.toFixed(1):'-';
-    document.getElementById('lux').textContent=v?d.ambient.toFixed(0):'-';
-    f('fl_lt',d.bike_light===2,'Light: '+(LT[d.bike_light]||'-'));
-    f('fl_lk',d.locked,'Lock');
-    f('fl_ch',d.charger,'Charger');
-    f('fl_rv',d.reserve,'Reserve');
-    f('fl_dg',d.diag,'Diag');
-    f('fl_st',d.standstill,'Stationary');
-    f('fl_cl',d.client,'Client');
-    for(var i=1;i<=4;i++)document.getElementById('mb'+i).className='mbtn'+(d.mode==i?' act':'');
-    document.getElementById('sb0').className='mbtn'+(d.sim?'':' act');
-    document.getElementById('sb1').className='mbtn'+(d.sim?' act':'');
-    document.getElementById('db0').className='mbtn'+(d.debug?'':' act');
-    document.getElementById('db1').className='mbtn'+(d.debug?' act':'');
-    if(!nameFocused){
-      document.getElementById('dname').value=d.base_name||'';
-      document.getElementById('dnprev').textContent='BLE name: '+d.device_name;
+    document.getElementById('odo').textContent=v?d.odometer.toFixed(1):'—';
+    document.getElementById('lux').textContent=v?d.ambient.toFixed(0):'—';
+    updateFlags(d);
+    document.getElementById('mDesc').textContent=t('mDesc')[d.mode]||'';
+    for(let i=1;i<=4;i++)document.getElementById('mb'+i).className='mbtn'+(d.mode===i?' act':'');
+    document.getElementById('sb0').className='tbtn'+(d.sim?'':' act');
+    document.getElementById('sb1').className='tbtn'+(d.sim?' act':'');
+    document.getElementById('db0').className='tbtn'+(d.debug?'':' act');
+    document.getElementById('db1').className='tbtn'+(d.debug?' act':'');
+    if(!nameFoc){
+      dnEl.value=d.base_name||'';
+      document.getElementById('dnprev').textContent=t('bleName')+d.device_name;
     }
-  }).catch(()=>{document.getElementById('st').textContent='Web connection error';})
-    .finally(()=>{busy=false;});
+    document.getElementById('verLine').textContent='v'+(d.version||'—')+' · '+MN[d.mode];
+    document.getElementById('ts').textContent=t('updated')+new Date().toLocaleTimeString();
+  }).catch(()=>{
+    errCnt++;
+    if(errCnt>=3){setDot('',t('connLost'));document.getElementById('errB').style.display='block';document.getElementById('errB').textContent=t('connRetry');}
+  }).finally(()=>{busy=false;});
 }
+
+setLang(L);
 pollData();
 setInterval(pollData,1000);
 </script></body></html>)html";
@@ -1232,24 +1348,141 @@ static void handleSetSim() {
 static const char UPDATE_HTML[] PROGMEM = R"html(<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>BoschEBike Bridge OTA</title>
+<title>Firmware Update — BoschEBike Bridge</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#x26A1;</text></svg>">
 <style>
-*{box-sizing:border-box}
-body{background:#0d1117;color:#e6edf3;font-family:system-ui,sans-serif;margin:0;padding:20px}
-main{max-width:520px}
-h1{font-size:20px;margin:0 0 16px}
-form{background:#161b22;border-radius:8px;padding:16px}
-input,button{width:100%;font-size:15px;margin-top:12px}
-button{background:#1f6feb;color:white;border:0;border-radius:6px;padding:10px}
-p{color:#8b949e;font-size:13px;line-height:1.4}
-</style></head><body><main>
-<h1>Firmware update</h1>
-<form method="POST" action="/update" enctype="multipart/form-data">
-<input type="file" name="firmware" accept=".bin" required>
-<button type="submit">Upload firmware</button>
-</form>
-<p>Use the file <code>.pio/build/lolin32_lite/firmware.bin</code>. The ESP32 reboots automatically after a successful update.</p>
-</main></body></html>)html";
+:root{--bg:#0d1117;--sf:#161b22;--sf2:#1c2128;--bd:#30363d;--tx:#e6edf3;--mu:#8b949e;--bl:#58a6ff;--gn:#3fb950;--re:#f85149}
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--tx);font-family:system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;font-size:14px;line-height:1.5;padding:16px}
+.wrap{max-width:520px}
+.back{display:inline-flex;align-items:center;gap:4px;color:var(--mu);text-decoration:none;font-size:13px;margin-bottom:16px;transition:color .15s}
+.back:hover{color:var(--tx)}
+.hdr{display:flex;align-items:flex-start;justify-content:space-between;gap:8px;margin-bottom:16px;flex-wrap:wrap}
+h1{font-size:18px;font-weight:600;color:var(--tx)}
+.lang-sw{display:flex;gap:2px;background:var(--sf);border:1px solid var(--bd);border-radius:6px;padding:2px}
+.lang-btn{background:transparent;border:none;border-radius:4px;color:var(--mu);cursor:pointer;font:11px/1 system-ui,-apple-system,sans-serif;padding:3px 7px;transition:background .15s,color .15s}
+.lang-btn:hover:not(.act){background:var(--bd);color:var(--tx)}
+.lang-btn.act{background:var(--bl);color:#fff}
+.sec{background:var(--sf);border:1px solid var(--bd);border-radius:10px;padding:16px;margin-bottom:10px}
+.drop{display:block;border:2px dashed var(--bd);border-radius:8px;padding:24px;text-align:center;cursor:pointer;color:var(--mu);font-size:13px;transition:border-color .15s,color .15s}
+.drop:hover,.drop.has{border-color:var(--bl);color:var(--bl)}
+#fileIn{display:none}
+#fname{font-size:12px;color:var(--bl);margin-top:6px;min-height:16px;text-align:center}
+.ubtn{display:block;width:100%;background:#1f6feb;color:#fff;border:none;border-radius:6px;padding:10px;font:14px/1 system-ui,-apple-system,sans-serif;font-weight:500;cursor:pointer;margin-top:12px;transition:background .15s}
+.ubtn:disabled{opacity:.5;cursor:not-allowed}
+.ubtn:not(:disabled):hover{background:#388bfd}
+.prog{display:none;margin-top:12px}
+.prog-bg{background:var(--bd);border-radius:4px;height:8px;overflow:hidden}
+.prog-fill{height:100%;border-radius:4px;background:var(--bl);width:0%;transition:width .2s}
+#progPct{font-size:12px;color:var(--mu);text-align:right;margin-top:4px}
+#result{margin-top:12px;padding:10px 12px;border-radius:6px;font-size:13px;display:none}
+#result.ok{background:#3fb95033;border:1px solid var(--gn);color:var(--gn)}
+#result.err{background:#f8514933;border:1px solid var(--re);color:var(--re)}
+.note{font-size:12px;color:var(--mu);line-height:1.6}
+.note p+p{margin-top:6px}
+</style></head><body>
+<div class="wrap">
+<a href="/" class="back" id="backLink">&#x2190; Dashboard</a>
+<div class="hdr">
+  <h1 id="pageTitle">Firmware Update</h1>
+  <div class="lang-sw">
+    <button class="lang-btn" data-lang="en" onclick="setLang('en')">EN</button>
+    <button class="lang-btn" data-lang="it" onclick="setLang('it')">IT</button>
+    <button class="lang-btn" data-lang="de" onclick="setLang('de')">DE</button>
+    <button class="lang-btn" data-lang="fr" onclick="setLang('fr')">FR</button>
+    <button class="lang-btn" data-lang="es" onclick="setLang('es')">ES</button>
+  </div>
+</div>
+<div class="sec">
+  <label class="drop" id="dropLbl" for="fileIn">&#x1F4C2; <span id="dropTxt">Click to select firmware file (.bin)</span></label>
+  <input type="file" id="fileIn" accept=".bin">
+  <div id="fname"></div>
+  <button class="ubtn" id="upBtn" disabled onclick="startUpload()" id="upBtn">Upload Firmware</button>
+  <div class="prog" id="progWrap">
+    <div class="prog-bg"><div class="prog-fill" id="progFill"></div></div>
+    <div id="progPct">0%</div>
+  </div>
+  <div id="result"></div>
+</div>
+<div class="sec">
+  <div class="note">
+    <p id="note1">Build the firmware with PlatformIO and select the .bin file from the build output.</p>
+    <p id="note2">The bridge reboots automatically after a successful update. Wait for the page to reconnect.</p>
+  </div>
+</div>
+</div>
+<script>
+const TU={
+en:{back:'← Dashboard',title:'Firmware Update',dropTxt:'Click to select firmware file (.bin)',upBtn:'Upload Firmware',note1:'Build the firmware with PlatformIO and select the .bin file from the build output.',note2:'The bridge reboots automatically after a successful update. Wait for the page to reconnect.',ok:'Update complete. Rebooting…',errFail:'Update failed: ',errConn:'Upload error — check connection'},
+it:{back:'← Dashboard',title:'Aggiornamento firmware',dropTxt:'Clicca per selezionare il file firmware (.bin)',upBtn:'Carica firmware',note1:'Compila il firmware con PlatformIO e seleziona il file .bin dall\'output di build.',note2:'Il bridge si riavvia automaticamente dopo un aggiornamento riuscito. Attendi che la pagina si riconnetta.',ok:'Aggiornamento completato. Riavvio…',errFail:'Aggiornamento fallito: ',errConn:'Errore di upload — verifica la connessione'},
+de:{back:'← Dashboard',title:'Firmware-Update',dropTxt:'Klicken, um Firmware-Datei (.bin) auszuwählen',upBtn:'Firmware hochladen',note1:'Firmware mit PlatformIO erstellen und die .bin-Datei aus dem Build-Verzeichnis auswählen.',note2:'Die Bridge startet nach einem erfolgreichen Update automatisch neu. Warten, bis die Seite sich wieder verbindet.',ok:'Update abgeschlossen. Neustart…',errFail:'Update fehlgeschlagen: ',errConn:'Upload-Fehler — Verbindung prüfen'},
+fr:{back:'← Dashboard',title:'Mise à jour firmware',dropTxt:'Cliquer pour sélectionner le fichier firmware (.bin)',upBtn:'Téléverser le firmware',note1:'Compiler le firmware avec PlatformIO et sélectionner le fichier .bin depuis le dossier de build.',note2:'Le bridge redémarre automatiquement après une mise à jour réussie. Attendre que la page se reconnecte.',ok:'Mise à jour terminée. Redémarrage…',errFail:'Échec de la mise à jour : ',errConn:'Erreur d\'upload — vérifier la connexion'},
+es:{back:'← Dashboard',title:'Actualización de firmware',dropTxt:'Haz clic para seleccionar el archivo firmware (.bin)',upBtn:'Subir firmware',note1:'Compila el firmware con PlatformIO y selecciona el archivo .bin del directorio de build.',note2:'El bridge se reinicia automáticamente tras una actualización exitosa. Espera a que la página se vuelva a conectar.',ok:'Actualización completada. Reiniciando…',errFail:'Error en la actualización: ',errConn:'Error de subida — verifica la conexión'}
+};
+let L=localStorage.getItem('lang')||'en';
+if(!TU[L])L='en';
+
+function setLang(l){
+  L=l;localStorage.setItem('lang',l);
+  const s=TU[l];
+  document.getElementById('backLink').textContent=s.back;
+  document.getElementById('pageTitle').textContent=s.title;
+  document.getElementById('dropTxt').textContent=s.dropTxt;
+  document.getElementById('upBtn').textContent=s.upBtn;
+  document.getElementById('note1').textContent=s.note1;
+  document.getElementById('note2').textContent=s.note2;
+  document.querySelectorAll('.lang-btn').forEach(b=>b.classList.toggle('act',b.dataset.lang===l));
+  document.title=s.title+' — BoschEBike Bridge';
+}
+
+const fileIn=document.getElementById('fileIn');
+fileIn.addEventListener('change',function(){
+  const lbl=document.getElementById('dropLbl');
+  const fn=document.getElementById('fname');
+  if(this.files.length){
+    const f=this.files[0];
+    lbl.classList.add('has');
+    fn.textContent=f.name+' ('+(f.size/1024).toFixed(1)+' KB)';
+    document.getElementById('upBtn').disabled=false;
+  }else{
+    lbl.classList.remove('has');
+    fn.textContent='';
+    document.getElementById('upBtn').disabled=true;
+  }
+});
+
+function startUpload(){
+  const file=fileIn.files[0];
+  if(!file)return;
+  const fd=new FormData();
+  fd.append('firmware',file);
+  document.getElementById('upBtn').disabled=true;
+  document.getElementById('progWrap').style.display='block';
+  const res=document.getElementById('result');
+  res.style.display='none';
+  const xhr=new XMLHttpRequest();
+  xhr.open('POST','/update');
+  xhr.upload.addEventListener('progress',function(e){
+    if(e.lengthComputable){
+      const p=Math.round(e.loaded/e.total*100);
+      document.getElementById('progFill').style.width=p+'%';
+      document.getElementById('progPct').textContent=p+'%';
+    }
+  });
+  xhr.addEventListener('load',function(){
+    res.style.display='block';
+    if(xhr.status===200){res.className='ok';res.textContent=TU[L].ok;}
+    else{res.className='err';res.textContent=TU[L].errFail+xhr.responseText;document.getElementById('upBtn').disabled=false;}
+  });
+  xhr.addEventListener('error',function(){
+    res.style.display='block';res.className='err';res.textContent=TU[L].errConn;
+    document.getElementById('upBtn').disabled=false;
+  });
+  xhr.send(fd);
+}
+
+setLang(L);
+</script></body></html>)html";
 
 static void handleUpdatePage() {
     webServer.sendHeader("Cache-Control", "no-store");
@@ -1276,7 +1509,7 @@ static void handleData() {
     LiveData d = gData;
     char buf[820];
     snprintf(buf, sizeof(buf),
-        "{\"sim\":%s,\"mode\":%d,\"base_name\":\"%s\",\"device_name\":\"%s\","
+        "{\"version\":\"" FIRMWARE_VERSION "\",\"sim\":%s,\"mode\":%d,\"base_name\":\"%s\",\"device_name\":\"%s\","
         "\"ebike\":%s,\"gatt\":%s,\"client\":%s,\"valid\":%s,"
         "\"speed\":%.2f,\"cadence\":%d,\"power\":%d,\"battery\":%d,"
         "\"bridge_battery\":%u,\"bridge_battery_mv\":%u,"
