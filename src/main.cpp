@@ -217,6 +217,21 @@ static ReField  reFields[RE_MAX_FIELD];
 static uint32_t rePacketCount  = 0;
 static uint32_t reLastPacketMs = 0;
 
+// Packet logger — records raw LDI bytes for offline analysis.
+// Start/stop via web UI; download as ldi_log.txt at /logdump.
+static const int PKTLOG_MAX  = 250;
+static const int PKTLOG_PLEN = 80;  // LDI packets are typically 20-60 bytes
+
+struct PktLogEntry {
+    uint32_t ms;
+    uint8_t  len;
+    uint8_t  data[PKTLOG_PLEN];
+};
+
+static PktLogEntry pktLog[PKTLOG_MAX];  // ~21 KB
+static int  pktLogCount  = 0;
+static bool pktLogActive = false;
+
 static void captureRawFields(const uint8_t* data, size_t len) {
     for (int i = 0; i < RE_MAX_FIELD; i++) reFields[i].changed = false;
     int pos = 0;
@@ -251,6 +266,14 @@ static void captureRawFields(const uint8_t* data, size_t len) {
     }
     rePacketCount++;
     reLastPacketMs = millis();
+
+    if (pktLogActive && pktLogCount < PKTLOG_MAX) {
+        PktLogEntry& e = pktLog[pktLogCount++];
+        e.ms  = millis();
+        e.len = (uint8_t)min(len, (size_t)PKTLOG_PLEN);
+        memcpy(e.data, data, e.len);
+        if (pktLogCount >= PKTLOG_MAX) pktLogActive = false;  // auto-stop when full
+    }
 }
 
 static void decodeLiveData(const uint8_t* data, size_t len) {
@@ -1726,10 +1749,22 @@ Sort by <b>Delta</b> to surface the most active fields. Sort by <b>Field #</b> t
 &nbsp;&bull;&nbsp; 21=locked &nbsp;&bull;&nbsp; 22=charger &nbsp;&bull;&nbsp; 23=light_reserve
 &nbsp;&bull;&nbsp; 24=diag &nbsp;&bull;&nbsp; 25=standstill
 </div>
+<div style="margin-top:12px;background:var(--sf);border:1px solid var(--bd);border-radius:8px;padding:12px;font-family:system-ui,-apple-system,sans-serif">
+  <div style="font-size:10px;font-weight:600;letter-spacing:.8px;text-transform:uppercase;color:var(--mu);margin-bottom:10px">Packet Logger</div>
+  <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+    <button id="logBtn" onclick="toggleLog()" style="background:#238636;color:#fff;border:none;border-radius:6px;padding:7px 18px;cursor:pointer;font:13px/1 system-ui,-apple-system,sans-serif;transition:background .15s">&#9654; Start</button>
+    <a id="dlBtn" href="/logdump" style="background:#1c2128;color:#e6edf3;border:1px solid #30363d;border-radius:6px;padding:6px 14px;text-decoration:none;font:12px/1 system-ui,-apple-system,sans-serif;pointer-events:none;opacity:.35;transition:opacity .2s">&#x2B07; Download log</a>
+    <span id="logSt" style="font-size:12px;color:var(--mu)">Ready</span>
+  </div>
+  <div style="font-size:11px;color:var(--mu);margin-top:8px">
+    Saves raw LDI packets with timestamps. Max 250 packets &mdash; recording stops automatically when full.<br>
+    Download the .txt file and share it for analysis.
+  </div>
+</div>
 </div>
 <script>
 const KNOWN={1:'speed×100',2:'cadence_rpm',5:'power_W',9:'ambient×1000',10:'battery_%',12:'odometer×1000',17:'light(0/1/2)',21:'locked',22:'charger',23:'light_reserve',24:'diag',25:'standstill'};
-let sortKey='n',sortAsc=true,lastData=null;
+let sortKey='n',sortAsc=true,lastData=null,logActive=false;
 
 function sort(k){
   if(sortKey===k)sortAsc=!sortAsc;
@@ -1754,9 +1789,7 @@ function render(d){
     const delta=wt2?'&mdash;':(f.d>=0?'+':'')+f.d;
     const badge=wt2?'<span class="badge wt2">bytes</span>':
                 (known?'<span class="badge kn">known</span>':'<span class="badge uk">unknown</span>');
-    const nameTd=wt2?
-      '<td class="bytes">'+f.b+'</td>':
-      '<td class="name">'+(known||'')+'</td>';
+    const nameTd=wt2?'<td class="bytes">'+f.b+'</td>':'<td class="name">'+(known||'')+'</td>';
     return '<tr class="'+(known?'known':'unknown')+' '+(f.chg?'changed':'')+'">'+
       '<td class="fn">'+f.n+'</td>'+
       '<td>'+(wt2?f.v+' B':f.v)+'</td>'+
@@ -1765,9 +1798,34 @@ function render(d){
       '<td class="delta">'+delta+'</td>'+
       '<td>'+f.cnt+'</td>'+
       '<td>'+badge+'</td>'+
-      nameTd+
-      '</tr>';
+      nameTd+'</tr>';
   }).join('');
+}
+
+function setLogUI(active,count,max){
+  logActive=active;
+  const btn=document.getElementById('logBtn');
+  const dl=document.getElementById('dlBtn');
+  const st=document.getElementById('logSt');
+  btn.textContent=active?'■ Stop':'▶ Start';
+  btn.style.background=active?'#da3633':'#238636';
+  const hasData=count>0;
+  dl.style.pointerEvents=hasData?'auto':'none';
+  dl.style.opacity=hasData?'1':'.35';
+  if(active) st.textContent='Recording… '+count+'/'+max+' pkts';
+  else if(hasData) st.textContent='Stopped — '+count+' packets ready';
+  else st.textContent='Ready';
+}
+
+function toggleLog(){
+  fetch(logActive?'/logstop':'/logstart',{cache:'no-store'})
+    .then(r=>r.text()).then(()=>updateLogStatus());
+}
+
+function updateLogStatus(){
+  fetch('/logstatus',{cache:'no-store'})
+    .then(r=>r.json()).then(d=>setLogUI(d.active,d.count,d.max))
+    .catch(()=>{});
 }
 
 function poll(){
@@ -1775,13 +1833,61 @@ function poll(){
     .then(r=>r.json()).then(render)
     .catch(()=>{document.getElementById('meta').textContent='Connection lost';});
 }
+
 poll();
 setInterval(poll,1500);
+setInterval(updateLogStatus,2000);
+updateLogStatus();
 </script></body></html>)html";
 
 static void handleExplorer() {
     webServer.sendHeader("Cache-Control", "no-store");
     webServer.send_P(200, "text/html", EXPLORER_HTML);
+}
+
+static void handleLogStart() {
+    pktLogCount  = 0;
+    pktLogActive = true;
+    webServer.sendHeader("Cache-Control", "no-store");
+    webServer.send(200, "text/plain", "Logging started");
+}
+
+static void handleLogStop() {
+    pktLogActive = false;
+    char buf[48];
+    snprintf(buf, sizeof(buf), "Stopped — %d packets recorded", pktLogCount);
+    webServer.sendHeader("Cache-Control", "no-store");
+    webServer.send(200, "text/plain", buf);
+}
+
+static void handleLogStatus() {
+    char buf[80];
+    snprintf(buf, sizeof(buf), "{\"active\":%s,\"count\":%d,\"max\":%d}",
+             pktLogActive ? "true" : "false", pktLogCount, PKTLOG_MAX);
+    webServer.sendHeader("Cache-Control", "no-store");
+    webServer.send(200, "application/json", buf);
+}
+
+static void handleLogDump() {
+    char line[200];
+    webServer.sendHeader("Content-Disposition", "attachment; filename=\"ldi_log.txt\"");
+    webServer.sendHeader("Cache-Control", "no-store");
+    webServer.setContentLength(CONTENT_LENGTH_UNKNOWN);
+    webServer.send(200, "text/plain", "");
+    snprintf(line, sizeof(line), "# BoschEBike LDI Packet Log — %d packets\n", pktLogCount);
+    webServer.sendContent(line);
+    webServer.sendContent("# format: uptime_ms hex_bytes\n");
+    webServer.sendContent("# known fields: 1=speed*100 2=cadence 5=power_W 9=ambient*1000"
+                          " 10=battery% 12=odometer*1000 17=light 21=locked 22=charger"
+                          " 23=reserve 24=diag 25=standstill\n");
+    for (int i = 0; i < pktLogCount; i++) {
+        const PktLogEntry& e = pktLog[i];
+        int n = snprintf(line, sizeof(line), "%lu ", (unsigned long)e.ms);
+        for (int j = 0; j < e.len && n < (int)sizeof(line) - 3; j++)
+            n += snprintf(line + n, sizeof(line) - n, "%02x", e.data[j]);
+        line[n++] = '\n'; line[n] = '\0';
+        webServer.sendContent(line);
+    }
 }
 
 static void startWebDebug() {
@@ -1815,6 +1921,10 @@ static void startWebDebug() {
     webServer.on("/clearlog",  handleClearLog);
     webServer.on("/fields",    handleFieldsJson);
     webServer.on("/explorer",  handleExplorer);
+    webServer.on("/logstart",  handleLogStart);
+    webServer.on("/logstop",   handleLogStop);
+    webServer.on("/logstatus", handleLogStatus);
+    webServer.on("/logdump",   handleLogDump);
     webServer.on("/update",  HTTP_GET,  handleUpdatePage);
     webServer.on("/update",  HTTP_POST, handleUpdateDone, handleUpdateUpload);
     webServer.begin();
