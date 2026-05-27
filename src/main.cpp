@@ -197,6 +197,62 @@ static VInt readVarint(const uint8_t* d, int pos, int len) {
     return { v, pos };
 }
 
+// Raw field capture for reverse engineering.
+// Captures every protobuf field seen in real LDI packets from the bike.
+// Only called from handleLdiPayload() — not triggered by sim or no-ebike data.
+static const int RE_MAX_FIELD = 128;
+
+struct ReField {
+    bool     seen      = false;
+    uint8_t  wireType  = 0;      // 0=varint, 2=length-delimited
+    uint64_t value     = 0;      // decoded value (varint) or byte count (len-delim)
+    uint64_t prevValue = 0;
+    bool     changed   = false;  // true if value differed from previous packet
+    uint32_t seenCount = 0;
+    uint8_t  bytes[16] = {};     // first 16 raw bytes of length-delimited fields
+    uint8_t  byteLen   = 0;
+};
+
+static ReField  reFields[RE_MAX_FIELD];
+static uint32_t rePacketCount  = 0;
+static uint32_t reLastPacketMs = 0;
+
+static void captureRawFields(const uint8_t* data, size_t len) {
+    for (int i = 0; i < RE_MAX_FIELD; i++) reFields[i].changed = false;
+    int pos = 0;
+    while (pos < (int)len) {
+        auto tag = readVarint(data, pos, len); pos = tag.p;
+        int fn = (int)(tag.v >> 3), wt = (int)(tag.v & 7);
+        if (wt == 0) {
+            auto v = readVarint(data, pos, len); pos = v.p;
+            if (fn > 0 && fn < RE_MAX_FIELD) {
+                ReField& rf  = reFields[fn];
+                rf.changed   = rf.seen && (rf.value != v.v);
+                rf.prevValue = rf.value;
+                rf.value     = v.v;
+                rf.seen      = true;
+                rf.wireType  = 0;
+                rf.seenCount++;
+            }
+        } else if (wt == 2) {
+            auto sl = readVarint(data, pos, len);
+            if (fn > 0 && fn < RE_MAX_FIELD) {
+                ReField& rf  = reFields[fn];
+                rf.seen      = true;
+                rf.wireType  = 2;
+                rf.value     = sl.v;
+                rf.byteLen   = (uint8_t)min((size_t)16, (size_t)sl.v);
+                memcpy(rf.bytes, data + sl.p, rf.byteLen);
+                rf.changed   = true;
+                rf.seenCount++;
+            }
+            pos = sl.p + (int)sl.v;
+        } else break;
+    }
+    rePacketCount++;
+    reLastPacketMs = millis();
+}
+
 static void decodeLiveData(const uint8_t* data, size_t len) {
     LiveData ld = gData;
     int pos = 0;
@@ -483,6 +539,7 @@ static void notifyCscData() {
 }
 
 static void handleLdiPayload(const uint8_t* data, size_t len) {
+    captureRawFields(data, len);
     decodeLiveData(data, len);
     // Rate-limited log: at most one entry every 10 s so the buffer is not flooded
     uint32_t nowL = millis();
@@ -1104,7 +1161,7 @@ hr.div{border:none;border-top:1px solid var(--bd);margin:10px 0}
   </div>
   <div class="sl" id="dbst"></div>
 </div>
-<div class="ftr"><span id="ts"></span><a href="/update" id="otaLink">Firmware update &#x2197;</a></div>
+<div class="ftr"><span id="ts"></span><div style="display:flex;gap:14px"><a href="/explorer">Field Explorer &#x2197;</a><a href="/update" id="otaLink">Firmware update &#x2197;</a></div></div>
 </div>
 <script>
 const T={
@@ -1573,6 +1630,160 @@ static void handleSetDebug() {
     ESP.restart();
 }
 
+static void handleFieldsJson() {
+    static char buf[6144];
+    uint32_t ageMs = reLastPacketMs ? (millis() - reLastPacketMs) : 0xFFFFFFFFu;
+    int pos = snprintf(buf, sizeof(buf), "{\"count\":%lu,\"age_ms\":%lu,\"fields\":[",
+                       (unsigned long)rePacketCount, (unsigned long)ageMs);
+    bool first = true;
+    for (int i = 1; i < RE_MAX_FIELD && pos < (int)sizeof(buf) - 200; i++) {
+        const ReField& f = reFields[i];
+        if (!f.seen) continue;
+        if (!first) buf[pos++] = ',';
+        first = false;
+        if (f.wireType == 0) {
+            int64_t delta = (int64_t)f.value - (int64_t)f.prevValue;
+            pos += snprintf(buf + pos, sizeof(buf) - pos,
+                "{\"n\":%d,\"wt\":0,\"v\":%llu,\"p\":%llu,\"d\":%lld,\"cnt\":%lu,\"chg\":%s}",
+                i, (unsigned long long)f.value, (unsigned long long)f.prevValue,
+                (long long)delta, (unsigned long)f.seenCount,
+                f.changed ? "true" : "false");
+        } else {
+            char hexStr[33] = {};
+            for (int j = 0; j < f.byteLen; j++)
+                snprintf(hexStr + j * 2, sizeof(hexStr) - j * 2, "%02x", f.bytes[j]);
+            pos += snprintf(buf + pos, sizeof(buf) - pos,
+                "{\"n\":%d,\"wt\":2,\"v\":%llu,\"cnt\":%lu,\"chg\":%s,\"b\":\"%s\"}",
+                i, (unsigned long long)f.value, (unsigned long)f.seenCount,
+                f.changed ? "true" : "false", hexStr);
+        }
+    }
+    snprintf(buf + pos, sizeof(buf) - pos, "]}");
+    webServer.sendHeader("Cache-Control", "no-store");
+    webServer.send(200, "application/json", buf);
+}
+
+static const char EXPLORER_HTML[] PROGMEM = R"html(<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>LDI Field Explorer</title>
+<style>
+:root{--bg:#0d1117;--sf:#161b22;--bd:#30363d;--tx:#e6edf3;--mu:#8b949e;--bl:#58a6ff;--gn:#3fb950;--ye:#d29922;--re:#f85149;--pu:#a371f7}
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--tx);font-family:ui-monospace,'Cascadia Code',Consolas,monospace;font-size:13px;padding:16px}
+.wrap{max-width:900px}
+.hdr{display:flex;align-items:center;gap:16px;margin-bottom:14px;flex-wrap:wrap}
+.hdr a{color:var(--mu);text-decoration:none;font-size:12px;font-family:system-ui,-apple-system,sans-serif}
+.hdr a:hover{color:var(--tx)}
+h1{font-size:16px;font-weight:600;color:var(--bl);font-family:system-ui,-apple-system,sans-serif}
+.meta{font-size:11px;color:var(--mu);margin-bottom:10px;font-family:system-ui,-apple-system,sans-serif}
+table{width:100%;border-collapse:collapse;background:var(--sf);border:1px solid var(--bd);border-radius:8px;overflow:hidden}
+th{background:#1c2128;color:var(--mu);font-size:10px;letter-spacing:.6px;text-transform:uppercase;padding:8px 12px;text-align:left;border-bottom:1px solid var(--bd);cursor:pointer;user-select:none;font-family:system-ui,-apple-system,sans-serif}
+th:hover{color:var(--tx)}
+td{padding:6px 12px;border-bottom:1px solid #21262d;vertical-align:middle}
+tr:last-child td{border-bottom:none}
+tr.known td.fn{color:var(--bl);font-weight:700}
+tr.unknown td.fn{color:var(--mu)}
+tr.changed{background:#d2992212}
+tr.changed td.delta{color:var(--ye);font-weight:700}
+.badge{display:inline-block;padding:1px 6px;border-radius:10px;font-size:10px;border:1px solid;font-family:system-ui,-apple-system,sans-serif}
+.badge.kn{border-color:var(--bl);color:var(--bl)}
+.badge.uk{border-color:var(--mu);color:var(--mu)}
+.badge.wt2{border-color:var(--pu);color:var(--pu)}
+td.hex{color:var(--mu);font-size:11px}
+td.name{color:var(--gn);font-family:system-ui,-apple-system,sans-serif;font-size:12px}
+td.bytes{color:var(--pu);font-size:11px;word-break:break-all}
+.note{margin-top:14px;font-size:11px;color:var(--mu);line-height:1.8;font-family:system-ui,-apple-system,sans-serif;background:var(--sf);border:1px solid var(--bd);border-radius:8px;padding:12px}
+.note b{color:var(--tx)}
+</style></head><body>
+<div class="wrap">
+<div class="hdr">
+  <a href="/">&#x2190; Dashboard</a>
+  <h1>LDI Field Explorer</h1>
+</div>
+<div class="meta" id="meta">Waiting for data&#x2026;</div>
+<table>
+<thead><tr>
+  <th onclick="sort('n')">Field #</th>
+  <th onclick="sort('v')">Value (dec)</th>
+  <th>Hex</th>
+  <th onclick="sort('p')">Prev</th>
+  <th class="delta" onclick="sort('d')">Delta</th>
+  <th onclick="sort('cnt')">Count</th>
+  <th>Type</th>
+  <th>Name / bytes</th>
+</tr></thead>
+<tbody id="rows"></tbody>
+</table>
+<div class="note">
+<b>How to read this table:</b><br>
+Fields highlighted in yellow changed in the last received packet &mdash; these are the interesting ones.<br>
+<b>Unknown</b> fields are what we are looking for: correlate their value with what the bike is doing (pedalling harder, changing assist level, braking, etc.).<br>
+Sort by <b>Delta</b> to surface the most active fields. Sort by <b>Field #</b> to see the full picture.<br><br>
+<b>Known fields:</b>
+1=speed&times;100 &nbsp;&bull;&nbsp; 2=cadence_rpm &nbsp;&bull;&nbsp; 5=power_W &nbsp;&bull;&nbsp; 9=ambient&times;1000
+&nbsp;&bull;&nbsp; 10=battery_% &nbsp;&bull;&nbsp; 12=odometer&times;1000 &nbsp;&bull;&nbsp; 17=light(0/1/2)
+&nbsp;&bull;&nbsp; 21=locked &nbsp;&bull;&nbsp; 22=charger &nbsp;&bull;&nbsp; 23=light_reserve
+&nbsp;&bull;&nbsp; 24=diag &nbsp;&bull;&nbsp; 25=standstill
+</div>
+</div>
+<script>
+const KNOWN={1:'speed×100',2:'cadence_rpm',5:'power_W',9:'ambient×1000',10:'battery_%',12:'odometer×1000',17:'light(0/1/2)',21:'locked',22:'charger',23:'light_reserve',24:'diag',25:'standstill'};
+let sortKey='n',sortAsc=true,lastData=null;
+
+function sort(k){
+  if(sortKey===k)sortAsc=!sortAsc;
+  else{sortKey=k;sortAsc=true;}
+  if(lastData)render(lastData);
+}
+
+function render(d){
+  lastData=d;
+  const age=d.age_ms>60000?'—':d.age_ms+'ms ago';
+  document.getElementById('meta').textContent=
+    'Packets received: '+d.count+' · Last packet: '+age+' · Fields seen: '+d.fields.length;
+  const rows=d.fields.slice().sort((a,b)=>{
+    const av=a[sortKey]??0, bv=b[sortKey]??0;
+    return sortAsc?av-bv:bv-av;
+  });
+  document.getElementById('rows').innerHTML=rows.map(f=>{
+    const known=KNOWN[f.n];
+    const wt2=f.wt===2;
+    const hexVal=wt2?'&mdash;':'0x'+BigInt(f.v).toString(16).toUpperCase().padStart(4,'0');
+    const prevVal=wt2?'&mdash;':f.p;
+    const delta=wt2?'&mdash;':(f.d>=0?'+':'')+f.d;
+    const badge=wt2?'<span class="badge wt2">bytes</span>':
+                (known?'<span class="badge kn">known</span>':'<span class="badge uk">unknown</span>');
+    const nameTd=wt2?
+      '<td class="bytes">'+f.b+'</td>':
+      '<td class="name">'+(known||'')+'</td>';
+    return '<tr class="'+(known?'known':'unknown')+' '+(f.chg?'changed':'')+'">'+
+      '<td class="fn">'+f.n+'</td>'+
+      '<td>'+(wt2?f.v+' B':f.v)+'</td>'+
+      '<td class="hex">'+hexVal+'</td>'+
+      '<td>'+prevVal+'</td>'+
+      '<td class="delta">'+delta+'</td>'+
+      '<td>'+f.cnt+'</td>'+
+      '<td>'+badge+'</td>'+
+      nameTd+
+      '</tr>';
+  }).join('');
+}
+
+function poll(){
+  fetch('/fields',{cache:'no-store'})
+    .then(r=>r.json()).then(render)
+    .catch(()=>{document.getElementById('meta').textContent='Connection lost';});
+}
+poll();
+setInterval(poll,1500);
+</script></body></html>)html";
+
+static void handleExplorer() {
+    webServer.sendHeader("Cache-Control", "no-store");
+    webServer.send_P(200, "text/html", EXPLORER_HTML);
+}
+
 static void startWebDebug() {
     IPAddress apIp(192, 168, 4, 1);
     WiFi.persistent(false);
@@ -1602,6 +1813,8 @@ static void startWebDebug() {
     webServer.on("/setdebug",  handleSetDebug);
     webServer.on("/log",       handleLog);
     webServer.on("/clearlog",  handleClearLog);
+    webServer.on("/fields",    handleFieldsJson);
+    webServer.on("/explorer",  handleExplorer);
     webServer.on("/update",  HTTP_GET,  handleUpdatePage);
     webServer.on("/update",  HTTP_POST, handleUpdateDone, handleUpdateUpload);
     webServer.begin();
