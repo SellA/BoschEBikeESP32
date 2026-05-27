@@ -1,45 +1,37 @@
 /*
  * BoschEBike Multi-Mode Bridge
  *
- * ── Overview ──────────────────────────────────────────────────────────────────
- * The ESP32 sits between a Bosch eBike and a BLE client (Suunto watch, Garmin,
- * Wahoo, or any fitness app). The operating mode is selected at runtime via the
- * web UI and stored in NVS so it survives reboots. Flash many boards with the
- * same firmware, then configure each one independently.
+ * ESP32 bridge between a Bosch eBike and any BLE fitness client (Suunto,
+ * Garmin, Wahoo, apps). Mode is selected from the web UI and stored in NVS.
  *
- * ── Modes ─────────────────────────────────────────────────────────────────────
- *   1 — Suunto Bridge   transparent LDI proxy → Suunto watch / custom app
- *   2 — Power Sensor    standard Cycling Power Service (CPS, UUID 0x1818)
- *   3 — Speed & Cadence standard Cycling Speed & Cadence (CSC, UUID 0x1816)
+ * Modes:
+ *   1  Suunto Bridge   - transparent LDI proxy for Suunto watch / custom app
+ *   2  Power Sensor    - Cycling Power Service (CPS, UUID 0x1818)
+ *   3  Speed & Cadence - Cycling Speed & Cadence Service (CSC, UUID 0x1816)
+ *   4  Power + Cadence - CPS (0x1818) with wheel + crank data packed in
  *
- * ── BLE roles ─────────────────────────────────────────────────────────────────
- *   GATT Client  →  toward the bike (Bosch LDI spec, same in all modes)
- *   GATT Server  →  toward the client (mode-specific service/characteristics)
+ * BLE:
+ *   GATT Client -> bike (Bosch LDI, same in all modes)
+ *   GATT Server -> fitness client (mode-specific service/characteristics)
  *
- * ── Advertising flow ──────────────────────────────────────────────────────────
- *   Phase 1: LDI solicitation (AD type 0x15) → attracts the Bosch system unit
- *   Phase 2: mode-specific service UUID      → attracts the BLE client
+ * Advertising:
+ *   Phase 1: LDI solicitation (AD type 0x15) to attract the Bosch system unit
+ *   Phase 2: mode-specific service UUID to attract the fitness client
  *
- * ── Bosch LDI UUIDs ───────────────────────────────────────────────────────────
- *   Service:        0000eb20-eaa2-11e9-81b4-2a2ae2dbcce4
- *   Characteristic: 0000eb21-eaa2-11e9-81b4-2a2ae2dbcce4  (notify)
+ * Bosch LDI UUIDs:
+ *   Service:  0000eb20-eaa2-11e9-81b4-2a2ae2dbcce4
+ *   Char:     0000eb21-eaa2-11e9-81b4-2a2ae2dbcce4  (notify)
  *
- * ── Protobuf payload (LDI Live Data) ─────────────────────────────────────────
- *   Field  1: speed × 100 (÷100 → km/h)          Field 17: bike light (0/1/2)
- *   Field  2: cadence (rpm)                        Field 21: system locked
- *   Field  5: motor power (W)                      Field 22: charger connected
- *   Field  9: ambient light × 1000 (÷1000 → lux)  Field 23: light reserve
- *   Field 10: battery SoC (%)                      Field 24: diagnostics
- *   Field 12: odometer × 1000 (÷1000 → km)         Field 25: not driving
+ * LDI protobuf fields:
+ *   1=speed*100  2=cadence  5=power  9=ambient*1000  10=battery%
+ *   12=odometer*1000  17=light  21=locked  22=charger  23=reserve  24=diag  25=standstill
  *
- * ── NVS ───────────────────────────────────────────────────────────────────────
- *   Namespace "ebike", key "mode" (uint8): 1 / 2 / 3
- *   Changed via web UI → saved to NVS → reboot to apply
+ * NVS namespace "ebike": mode(u8), dname(str), sim(u8), bdbg(u8)
  *
- * ── Web UI / OTA ──────────────────────────────────────────────────────────────
- *   Wi-Fi AP: "BoschEBike Bridge" / "password"
- *   Dashboard:  http://192.168.4.1
- *   OTA update: http://192.168.4.1/update  (upload firmware.bin)
+ * Web UI / OTA:
+ *   AP "BoschEBike Bridge" / "password"
+ *   http://192.168.4.1        dashboard
+ *   http://192.168.4.1/update  OTA upload
  */
 
 #include <Arduino.h>
@@ -55,7 +47,7 @@
 
 #define FIRMWARE_VERSION "1.0.0"
 
-// ─── Firmware mode ────────────────────────────────────────────────────────────
+// Firmware mode
 enum FirmwareMode : uint8_t {
     MODE_SUUNTO_BRIDGE  = 1,
     MODE_POWER_SENSOR   = 2,
@@ -68,10 +60,9 @@ static const FirmwareMode DEFAULT_MODE = MODE_SUUNTO_BRIDGE;
 
 static FirmwareMode gMode = DEFAULT_MODE;
 
-// ─── Device name ──────────────────────────────────────────────────────────────
-// The full BLE device name is "<base> Bridge|Power|SpeedCadence".
-// gBaseDeviceName is stored in NVS (key "dname"); gDeviceName is composed at
-// boot and used everywhere (NimBLEDevice::init, advertising scan response).
+// Device name
+// gBaseDeviceName is stored in NVS (key "dname"); gDeviceName is built at boot
+// by appending a mode suffix and used everywhere (BLE init, scan response).
 static char gBaseDeviceName[21] = "BoschEBike";  // max 20 chars + null
 static char gDeviceName[34]     = {};             // base + longest suffix " PowerCadence"
 
@@ -83,16 +74,14 @@ static void buildDeviceName() {
     snprintf(gDeviceName, sizeof(gDeviceName), "%s%s", gBaseDeviceName, suffix);
 }
 
-// ─── Simulation ───────────────────────────────────────────────────────────────
-// When gSimEnabled is true the ESP32 generates synthetic data and advertises
-// immediately for the client, without connecting to a real bike.
-// Toggled via web UI (/setsim) and stored in NVS key "sim".
+// Simulation
+// When true, synthetic data is generated and advertised immediately without
+// connecting to a real bike. Toggled via web UI (/setsim), stored in NVS "sim".
 static bool gSimEnabled = false;
 
-// ─── BLE Debug Log ────────────────────────────────────────────────────────────
-// Toggled via web UI (/setdebug) and stored in NVS key "bdbg".
-// Events are written to a fixed-size ring buffer in RAM and served as plain
-// text at GET /log — readable from a browser or via WebFetch at 192.168.4.1.
+// BLE debug log
+// Ring buffer in RAM, served as plain text at GET /log.
+// Toggled via web UI (/setdebug), stored in NVS "bdbg".
 static bool gBleDebug = false;
 
 static const int DBLOG_ENTRIES = 100;
@@ -176,7 +165,7 @@ static void updateStartupLed() {
     }
 }
 
-// ─── Decoded live data ────────────────────────────────────────────────────────
+// Live data
 struct LiveData {
     float   speedKmh     = 0.0f;
     int32_t cadenceRpm   = 0;
@@ -194,7 +183,7 @@ struct LiveData {
 };
 static LiveData gData;
 
-// ─── Manual protobuf decoder ──────────────────────────────────────────────────
+// Protobuf decoder
 struct VInt { uint64_t v; int p; };
 
 static VInt readVarint(const uint8_t* d, int pos, int len) {
@@ -238,7 +227,7 @@ static void decodeLiveData(const uint8_t* data, size_t len) {
     gData = ld;
 }
 
-// ─── Protobuf encoder (bridge mode simulation / no-ebike packet) ──────────────
+// Protobuf encoder (simulation / no-ebike packets)
 static int encodeVarint(uint8_t* buf, uint64_t val) {
     int n = 0;
     do {
@@ -305,17 +294,14 @@ static void updateBridgeBattery(bool force = false) {
     bridgeBatteryPercent = lipoPercentFromMv(bridgeBatteryMv);
 }
 
-// ─── CPS state ───────────────────────────────────────────────────────────────
-// Crank length in 1/10 mm units (1725 = 172.5 mm, a common default).
-// Updated via Cycling Power Control Point opcode 0x04.
-// Power data comes from the eBike, so this value is only stored and reported
-// back to the client — it has no effect on the power calculation.
+// CPS state
+// Crank length in 1/10 mm (1725 = 172.5 mm). Updated via CPCP opcode 0x04;
+// stored and reported back but has no effect on power (that comes from the bike).
 static uint16_t cpsCrankLengthTenthMm = 1725;
-// Wheel event timestamp for MODE_POWER_CADENCE CPS measurement.
-// CPS spec uses 1/2048 s resolution (different from CSC which uses 1/1024 s).
+// Wheel event timestamp for MODE_POWER_CADENCE (1/2048 s, differs from CSC's 1/1024 s).
 static uint16_t cpsCombWheelEventT = 0;
 
-// ─── CSC accumulator state ────────────────────────────────────────────────────
+// CSC accumulator state
 static float    cscWheelRevFrac    = 0.0f;
 static uint32_t cscWheelRevTotal   = 0;
 static uint16_t cscLastWheelEventT = 0;
@@ -324,13 +310,13 @@ static uint16_t cscCrankRevTotal   = 0;
 static uint16_t cscLastCrankEventT = 0;
 static uint32_t cscLastUpdateMs    = 0;
 
-// ─── BLE server characteristics (one per mode, only one non-null at runtime) ──
+// BLE server characteristics (one per mode, only one non-null at runtime)
 static NimBLEServer*         pServer  = nullptr;
 static NimBLECharacteristic* pLdiChar = nullptr;  // MODE_SUUNTO_BRIDGE
 static NimBLECharacteristic* pCpsChar = nullptr;  // MODE_POWER_SENSOR
 static NimBLECharacteristic* pCscChar = nullptr;  // MODE_SPEED_CADENCE
 
-// ─── BLE state ────────────────────────────────────────────────────────────────
+// BLE state
 static uint32_t nextGattRetryMs  = 0;
 static uint16_t ebikeConnHandle  = BLE_HS_CONN_HANDLE_NONE;
 static uint16_t clientConnHandle = BLE_HS_CONN_HANDLE_NONE;
@@ -366,7 +352,7 @@ static void startAdvertisingForEbike();
 static void startAdvertisingForClient();
 static bool openGattClient();
 
-// ─── Notify helpers ───────────────────────────────────────────────────────────
+// Notify helpers
 static void notifyLdiData(const uint8_t* data, size_t len) {
     if (!clientConnected || !pLdiChar) return;
     uint8_t buf[256];
@@ -391,19 +377,10 @@ static void notifyCpsData() {
     pCpsChar->notify();
 }
 
-// MODE_POWER_CADENCE: CPS Measurement with power + wheel revolution + crank revolution
-// data packed into a single packet. This is the standard way real power meters (e.g.
-// Favero Assioma, Garmin Vector) expose all three metrics over a single CPS service.
-//
-// Flags: 0x0030 = Wheel Revolution Data Present (bit 4) + Crank Revolution Data Present (bit 5)
-// Packet layout (14 bytes):
-//   flags(2LE) | power(2LE) | cum_wheel(4LE) | wheel_time(2LE,1/2048s) |
-//   cum_crank(2LE) | crank_time(2LE,1/1024s)
-//
-// CPS does not have a direct "cadence rpm" field. Clients derive cadence from
-// crank revolution deltas, so MODE_POWER_CADENCE encodes the Bosch rpm by
-// emitting one synthetic crank revolution per notification and setting the
-// event-time delta to exactly one revolution at the Bosch cadence.
+// CPS measurement with power + wheel + crank packed together (flags 0x0030).
+// Layout (14 bytes): flags(2LE) power(2LE) cum_wheel(4LE) wheel_evt(2LE,1/2048s)
+//                   cum_crank(2LE) crank_evt(2LE,1/1024s)
+// Cadence is derived by the client from successive crank revolution deltas.
 static void notifyCpsCombinedData() {
     if (!clientConnected || !pCpsChar) return;
 
@@ -523,7 +500,7 @@ static void handleLdiPayload(const uint8_t* data, size_t len) {
     else                                  notifyCpsCombinedData();  // MODE_POWER_CADENCE
 }
 
-// ─── Simulation / no-ebike data ───────────────────────────────────────────────
+// Simulation / no-ebike data
 static void generateAndNotifySimData() {
     uint32_t t = millis();
     gData.speedKmh   = triWave(t, 20000, 1500, 3500) / 100.0f;
@@ -571,7 +548,7 @@ static void notifyNoEbikeData() {
     }
 }
 
-// ─── GATT client callbacks (bike side) ───────────────────────────────────────
+// GATT client callbacks (bike side)
 static int gattWriteCccdCB(uint16_t, const struct ble_gatt_error* error,
                            struct ble_gatt_attr*, void*) {
     if (error->status == 0) {
@@ -749,7 +726,7 @@ static int customGapHandler(struct ble_gap_event* event, void*) {
     return 0;
 }
 
-// ─── BLE server callbacks ─────────────────────────────────────────────────────
+// BLE server callbacks
 class ServerCB : public NimBLEServerCallbacks {
     void onConnect(NimBLEServer*, ble_gap_conn_desc* desc) override {
         if (!gSimEnabled && !ebikeConnected) {
@@ -786,7 +763,7 @@ class ServerCB : public NimBLEServerCallbacks {
     bool onConfirmPIN(uint32_t) override { return true; }
 };
 
-// ─── BLE advertising ──────────────────────────────────────────────────────────
+// BLE advertising
 static void startAdvertisingForEbike() {
     dblog("ADV: eBike solicitation started");
     auto* adv = NimBLEDevice::getAdvertising();
@@ -885,14 +862,9 @@ static void resetAndAdvertiseForEbike() {
     startAdvertisingForEbike();
 }
 
-// ─── Cycling Power Control Point callbacks (CPS mode) ────────────────────────
-// The Cycling Power Control Point (0x2A66) is mandatory when CPS Feature bit 14
-// (Crank Length Adjustment Supported) is set. Fitness clients use it to configure
-// and verify crank length during pairing; without it they consider the sensor
-// non-compliant and may not offer it in cycling activities.
-// We implement opcodes 0x04 (Set Crank Length) and 0x05 (Request Crank Length).
-// All other opcodes get "Op Code Not Supported" (0x02). The crank length value
-// is stored but has no effect on power output — power comes from the eBike.
+// Cycling Power Control Point callbacks (CPS mode)
+// Mandatory when CPS Feature bit 14 is set. Handles Set/Request Crank Length
+// (opcodes 0x04/0x05); everything else gets "Op Code Not Supported" (0x02).
 class CpControlPointCB : public NimBLECharacteristicCallbacks {
     void onWrite(NimBLECharacteristic* pChar) override {
         std::string val = pChar->getValue();
@@ -940,12 +912,9 @@ class CpControlPointCB : public NimBLECharacteristicCallbacks {
     }
 };
 
-// ─── SC Control Point callbacks (CSC mode) ────────────────────────────────────
-// The SC Control Point (0x2A55) is mandatory when Wheel Revolution Data is
-// supported (CSC Feature bit 0). Suunto and other strict clients check for it
-// and disconnect if it is absent. We implement opcode 0x01 (Set Cumulative
-// Value) to let the client reset the wheel rev counter; all other opcodes get
-// "Opcode Not Supported" (0x02).
+// SC Control Point callbacks (CSC mode)
+// Mandatory when Wheel Revolution Data is supported (CSC Feature bit 0).
+// Opcode 0x01 resets the wheel rev counter; all others get "Not Supported".
 class ScControlPointCB : public NimBLECharacteristicCallbacks {
     void onWrite(NimBLECharacteristic* pChar) override {
         std::string val = pChar->getValue();
@@ -968,7 +937,7 @@ class ScControlPointCB : public NimBLECharacteristicCallbacks {
     }
 };
 
-// ─── Web server ───────────────────────────────────────────────────────────────
+// Web server
 static WebServer webServer(80);
 static bool     webOk             = false;
 static bool     wifiActive        = false;
@@ -1667,7 +1636,7 @@ static void manageWebPower() {
     if ((int32_t)(now - referenceMs - timeoutMs) >= 0) stopWebDebug();
 }
 
-// ─── Setup ────────────────────────────────────────────────────────────────────
+// Setup
 void setup() {
     Serial.begin(115200);
     startStartupLed();
@@ -1798,7 +1767,7 @@ void setup() {
     }
 }
 
-// ─── Loop ─────────────────────────────────────────────────────────────────────
+// Loop
 void loop() {
     updateStartupLed();
     updateBridgeBattery();
