@@ -137,8 +137,14 @@ static void dblog(const char* fmt, ...) {
 #define WHEEL_CIRCUMFERENCE_MM 2105
 #endif
 
-// LOLIN D32 battery divider: VBAT → 100 kΩ → IO35 → 100 kΩ → GND
-static const int      BATTERY_ADC_PIN            = 35;
+// Optional bridge battery sense input.
+// ESP32 classic boards such as LOLIN32 Lite often expose a divided VBAT signal
+// on GPIO35. ESP32-S3-Zero does not provide this by default, so leave it
+// disabled there unless you wire your own divider and override the macro.
+#ifndef BRIDGE_BATTERY_ADC_PIN
+#define BRIDGE_BATTERY_ADC_PIN 35
+#endif
+static const int      BATTERY_ADC_PIN            = BRIDGE_BATTERY_ADC_PIN;
 static const uint32_t BATTERY_SAMPLE_INTERVAL_MS = 5000;
 
 #ifdef LED_BUILTIN
@@ -146,13 +152,16 @@ static const int STARTUP_LED_PIN = LED_BUILTIN;
 #else
 static const int STARTUP_LED_PIN = 2;
 #endif
-static const bool     STARTUP_LED_ACTIVE_LOW = true;
+#ifndef STARTUP_LED_ACTIVE_LOW
+#define STARTUP_LED_ACTIVE_LOW 1
+#endif
+static const bool     STARTUP_LED_IS_ACTIVE_LOW = STARTUP_LED_ACTIVE_LOW != 0;
 static const uint32_t STARTUP_LED_ON_MS      = 2000;
 static uint32_t startupLedOffMs  = 0;
 static bool     startupLedActive = false;
 
 static void setStartupLed(bool on) {
-    digitalWrite(STARTUP_LED_PIN, STARTUP_LED_ACTIVE_LOW ? !on : on);
+    digitalWrite(STARTUP_LED_PIN, STARTUP_LED_IS_ACTIVE_LOW ? !on : on);
 }
 static void startStartupLed() {
     pinMode(STARTUP_LED_PIN, OUTPUT);
@@ -282,6 +291,11 @@ static uint8_t lipoPercentFromMv(uint16_t mv) {
 }
 
 static void updateBridgeBattery(bool force = false) {
+    if (BATTERY_ADC_PIN < 0) {
+        bridgeBatteryMv = 0;
+        bridgeBatteryPercent = 0;
+        return;
+    }
     uint32_t now = millis();
     if (!force && (int32_t)(now - nextBatterySampleMs) < 0) return;
     nextBatterySampleMs = now + BATTERY_SAMPLE_INTERVAL_MS;
@@ -962,8 +976,14 @@ static bool     webHadClient      = false;
 static uint32_t webStartedMs      = 0;
 static uint32_t lastWebClientSeenMs = 0;
 
-static const uint32_t WEB_BOOT_WINDOW_MS       = 60000;
-static const uint32_t WEB_IDLE_AFTER_CLIENT_MS = 60000;
+#ifndef WEB_BOOT_WINDOW_MS
+#define WEB_BOOT_WINDOW_MS 60000
+#endif
+#ifndef WEB_IDLE_AFTER_CLIENT_MS
+#define WEB_IDLE_AFTER_CLIENT_MS 60000
+#endif
+static const uint32_t WEB_BOOT_WINDOW_TIMEOUT_MS = WEB_BOOT_WINDOW_MS;
+static const uint32_t WEB_IDLE_AFTER_CLIENT_TIMEOUT_MS = WEB_IDLE_AFTER_CLIENT_MS;
 
 static const char INDEX_HTML[] PROGMEM = R"html(<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8">
@@ -1586,10 +1606,23 @@ static void handleSetDebug() {
 
 static void startWebDebug() {
     IPAddress apIp(192, 168, 4, 1);
-    WiFi.mode(WIFI_AP);
+    WiFi.persistent(false);
+    bool modeOk = WiFi.mode(WIFI_AP);
     WiFi.setSleep(false);
-    WiFi.softAPConfig(apIp, apIp, IPAddress(255, 255, 255, 0));
-    WiFi.softAP(WIFI_AP_SSID, WIFI_AP_PASS, 1, false, 4);
+    bool cfgOk = WiFi.softAPConfig(apIp, apIp, IPAddress(255, 255, 255, 0));
+    bool apOk  = WiFi.softAP(WIFI_AP_SSID, WIFI_AP_PASS, 1, false, 4);
+
+    Serial.printf("[WiFi] AP mode=%s, config=%s, start=%s\n",
+                  modeOk ? "ok" : "fail",
+                  cfgOk  ? "ok" : "fail",
+                  apOk   ? "ok" : "fail");
+    if (apOk) {
+        Serial.printf("[WiFi] SSID: %s, IP: %s, boot window: %lu ms, idle timeout: %lu ms\n",
+                      WIFI_AP_SSID,
+                      WiFi.softAPIP().toString().c_str(),
+                      (unsigned long)WEB_BOOT_WINDOW_TIMEOUT_MS,
+                      (unsigned long)WEB_IDLE_AFTER_CLIENT_TIMEOUT_MS);
+    }
 
     webServer.on("/",        handleRoot);
     webServer.on("/data",    handleData);
@@ -1607,8 +1640,8 @@ static void startWebDebug() {
     webStartedMs        = millis();
     lastWebClientSeenMs = webStartedMs;
     webHadClient        = false;
-    webOk               = true;
-    wifiActive          = true;
+    webOk               = apOk;
+    wifiActive          = apOk;
 }
 
 static void stopWebDebug() {
@@ -1629,7 +1662,7 @@ static void manageWebPower() {
         lastWebClientSeenMs = now;
         return;
     }
-    uint32_t timeoutMs   = webHadClient ? WEB_IDLE_AFTER_CLIENT_MS : WEB_BOOT_WINDOW_MS;
+    uint32_t timeoutMs   = webHadClient ? WEB_IDLE_AFTER_CLIENT_TIMEOUT_MS : WEB_BOOT_WINDOW_TIMEOUT_MS;
     uint32_t referenceMs = webHadClient ? lastWebClientSeenMs : webStartedMs;
     if ((int32_t)(now - referenceMs - timeoutMs) >= 0) stopWebDebug();
 }
@@ -1652,8 +1685,10 @@ void setup() {
     }
     buildDeviceName();
 
-    analogReadResolution(12);
-    analogSetPinAttenuation(BATTERY_ADC_PIN, ADC_11db);
+    if (BATTERY_ADC_PIN >= 0) {
+        analogReadResolution(12);
+        analogSetPinAttenuation(BATTERY_ADC_PIN, ADC_11db);
+    }
     updateBridgeBattery(true);
 
     startWebDebug();

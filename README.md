@@ -26,6 +26,7 @@ Compared with `master`, this branch adds:
 - BLE debug ring buffer available from the web UI at `/log`.
 - Bridge LiPo battery voltage/percentage monitoring on IO35.
 - PlatformIO environment for `lolin32_lite` in addition to `esp32dev`.
+- PlatformIO environment for `esp32-s3-zero`, with native USB CDC enabled.
 
 ## Operating modes
 
@@ -68,12 +69,13 @@ The firmware targets ESP32 boards based on ESP32-WROOM-32 or ESP32-WROVER module
 |---|---|---|
 | ESP32 DevKit style boards | `esp32dev` | Generic ESP32 Dev Module target. |
 | WEMOS / LOLIN32 Lite | `lolin32_lite` | Includes `upload_port = COM10` and `monitor_port = COM10` in `platformio.ini`. |
+| ESP32-S3-Zero | `esp32-s3-zero` | Uses PlatformIO board `esp32-s3-devkitc-1` as the closest generic ESP32-S3 target, with USB CDC on boot enabled. |
 | AZDelivery ESP32 DevKit V4 | `esp32dev` | Common ESP32 DevKit variant. |
 | DOIT ESP32 DevKit v1 | `esp32dev` | Equivalent DevKit layout. |
 | NodeMCU-32S | `esp32dev` | Check USB-UART driver. |
 | Lolin D32 / D32 Pro | `esp32dev` | Similar ESP32 target; adjust upload port if needed. |
 
-Boards based on ESP32-C3, ESP32-S2, or ESP32-S3 are not supported without code changes because their NimBLE/Arduino details differ from the ESP32 target used here.
+ESP32-S3 boards are now supported through the `esp32-s3-zero` environment. Battery sensing is disabled by default on that target because the common ESP32-S3-Zero layout does not expose the LOLIN-style VBAT divider used on GPIO35. If you add your own divider, override `BRIDGE_BATTERY_ADC_PIN` in `build_flags`.
 
 ## Software requirements
 
@@ -104,10 +106,22 @@ Build and upload for LOLIN32 Lite:
 pio run -e lolin32_lite -t upload
 ```
 
+Build and upload for ESP32-S3-Zero:
+
+```bash
+pio run -e esp32-s3-zero -t upload
+```
+
 Open the serial monitor at 115200 baud:
 
 ```bash
 pio device monitor -e lolin32_lite
+```
+
+For ESP32-S3-Zero:
+
+```bash
+pio device monitor -e esp32-s3-zero
 ```
 
 ## Web UI
@@ -241,6 +255,12 @@ Build the firmware:
 pio run -e lolin32_lite
 ```
 
+For ESP32-S3-Zero:
+
+```bash
+pio run -e esp32-s3-zero
+```
+
 Connect to the ESP32 Wi-Fi AP and open:
 
 ```text
@@ -254,6 +274,7 @@ Upload:
 ```
 
 Use `.pio/build/esp32dev/firmware.bin` if you built the `esp32dev` environment.
+Use `.pio/build/esp32-s3-zero/firmware.bin` if you built the `esp32-s3-zero` environment.
 
 ## Bosch LDI fields
 
